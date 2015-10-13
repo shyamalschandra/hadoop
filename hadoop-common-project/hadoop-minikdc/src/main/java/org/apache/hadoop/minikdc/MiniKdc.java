@@ -36,6 +36,7 @@ import org.apache.directory.server.core.kerberos.KeyDerivationInterceptor;
 import org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmIndex;
 import org.apache.directory.server.core.partition.impl.btree.jdbm.JdbmPartition;
 import org.apache.directory.server.core.partition.ldif.LdifPartition;
+import org.apache.directory.server.kerberos.KerberosConfig;
 import org.apache.directory.server.kerberos.kdc.KdcServer;
 import org.apache.directory.server.kerberos.shared.crypto.encryption.KerberosKeyFactory;
 import org.apache.directory.server.kerberos.shared.keytab.Keytab;
@@ -79,9 +80,9 @@ import java.util.UUID;
 /**
  * Mini KDC based on Apache Directory Server that can be embedded in testcases
  * or used from command line as a standalone KDC.
- * <p/>
+ * <p>
  * <b>From within testcases:</b>
- * <p/>
+ * <p>
  * MiniKdc sets 2 System properties when started and un-sets them when stopped:
  * <ul>
  *   <li>java.security.krb5.conf: set to the MiniKDC real/host/port</li>
@@ -92,7 +93,7 @@ import java.util.UUID;
  * For example, running testcases in parallel that start a KDC each. To
  * accomplish this a single MiniKdc should be used for all testcases running
  * in parallel.
- * <p/>
+ * <p>
  * MiniKdc default configuration values are:
  * <ul>
  *   <li>org.name=EXAMPLE (used to create the REALM)</li>
@@ -106,7 +107,6 @@ import java.util.UUID;
  *   <li>debug=false</li>
  * </ul>
  * The generated krb5.conf forces TCP connections.
- * <p/>
  */
 public class MiniKdc {
 
@@ -218,7 +218,7 @@ public class MiniKdc {
 
   /**
    * Convenience method that returns MiniKdc default configuration.
-   * <p/>
+   * <p>
    * The returned configuration is a copy, it can be customized before using
    * it to create a MiniKdc.
    * @return a MiniKdc default configuration.
@@ -419,7 +419,15 @@ public class MiniKdc {
       IOUtils.closeQuietly(is1);
     }
 
-    kdc = new KdcServer();
+    KerberosConfig kerberosConfig = new KerberosConfig();
+    kerberosConfig.setMaximumRenewableLifetime(Long.parseLong(conf
+        .getProperty(MAX_RENEWABLE_LIFETIME)));
+    kerberosConfig.setMaximumTicketLifetime(Long.parseLong(conf
+        .getProperty(MAX_TICKET_LIFETIME)));
+    kerberosConfig.setSearchBaseDn(String.format("dc=%s,dc=%s", orgName,
+        orgDomain));
+    kerberosConfig.setPaEncTimestampRequired(false);
+    kdc = new KdcServer(kerberosConfig);
     kdc.setDirectoryService(ds);
 
     // transport
@@ -432,12 +440,6 @@ public class MiniKdc {
       throw new IllegalArgumentException("Invalid transport: " + transport);
     }
     kdc.setServiceName(conf.getProperty(INSTANCE));
-    kdc.getConfig().setMaximumRenewableLifetime(
-            Long.parseLong(conf.getProperty(MAX_RENEWABLE_LIFETIME)));
-    kdc.getConfig().setMaximumTicketLifetime(
-            Long.parseLong(conf.getProperty(MAX_TICKET_LIFETIME)));
-
-    kdc.getConfig().setPaEncTimestampRequired(false);
     kdc.start();
 
     StringBuilder sb = new StringBuilder();
@@ -484,7 +486,6 @@ public class MiniKdc {
 
   /**
    * Stops the MiniKdc
-   * @throws Exception
    */
   public synchronized void stop() {
     if (kdc != null) {

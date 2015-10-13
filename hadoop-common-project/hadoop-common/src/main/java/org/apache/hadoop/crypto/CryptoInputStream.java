@@ -60,7 +60,7 @@ public class CryptoInputStream extends FilterInputStream implements
     Seekable, PositionedReadable, ByteBufferReadable, HasFileDescriptor, 
     CanSetDropBehind, CanSetReadahead, HasEnhancedByteBufferAccess, 
     ReadableByteChannel {
-  private static final byte[] oneByteBuf = new byte[1];
+  private final byte[] oneByteBuf = new byte[1];
   private final CryptoCodec codec;
   private final Decryptor decryptor;
   private final int bufferSize;
@@ -113,6 +113,7 @@ public class CryptoInputStream extends FilterInputStream implements
   public CryptoInputStream(InputStream in, CryptoCodec codec,
       int bufferSize, byte[] key, byte[] iv, long streamOffset) throws IOException {
     super(in);
+    CryptoStreamUtils.checkCodec(codec);
     this.bufferSize = CryptoStreamUtils.checkBufferSize(codec, bufferSize);
     this.codec = codec;
     this.key = key.clone();

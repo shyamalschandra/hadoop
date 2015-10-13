@@ -43,7 +43,7 @@ public class HostnameFilter implements Filter {
 
   /**
    * Initializes the filter.
-   * <p/>
+   * <p>
    * This implementation is a NOP.
    *
    * @param config filter configuration.
@@ -56,15 +56,15 @@ public class HostnameFilter implements Filter {
 
   /**
    * Resolves the requester hostname and delegates the request to the chain.
-   * <p/>
+   * <p>
    * The requester hostname is available via the {@link #get} method.
    *
    * @param request servlet request.
    * @param response servlet response.
    * @param chain filter chain.
    *
-   * @throws IOException thrown if an IO error occurrs.
-   * @throws ServletException thrown if a servet error occurrs.
+   * @throws IOException thrown if an IO error occurs.
+   * @throws ServletException thrown if a servlet error occurs.
    */
   @Override
   public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
@@ -101,7 +101,7 @@ public class HostnameFilter implements Filter {
 
   /**
    * Destroys the filter.
-   * <p/>
+   * <p>
    * This implementation is a NOP.
    */
   @Override

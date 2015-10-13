@@ -27,10 +27,11 @@ import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationSchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.QueuePlacementRule.NestedUserQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.FairSharePolicy;
-import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.ControlledClock;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.junit.Test;
 
@@ -41,18 +42,6 @@ public class TestAllocationFileLoaderService {
 
   final static String ALLOC_FILE = new File(TEST_DIR,
       "test-queues").getAbsolutePath();
-  
-  private class MockClock implements Clock {
-    private long time = 0;
-    @Override
-    public long getTime() {
-      return time;
-    }
-
-    public void tick(long ms) {
-      time += ms;
-    }
-  }
   
   @Test
   public void testGetAllocationFileFromClasspath() {
@@ -80,7 +69,8 @@ public class TestAllocationFileLoaderService {
     out.println("</allocations>");
     out.close();
     
-    MockClock clock = new MockClock();
+    ControlledClock clock = new ControlledClock();
+    clock.setTime(0);
     Configuration conf = new Configuration();
     conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
 
@@ -125,7 +115,7 @@ public class TestAllocationFileLoaderService {
     out.println("</allocations>");
     out.close();
     
-    clock.tick(System.currentTimeMillis()
+    clock.tickMsec(System.currentTimeMillis()
         + AllocationFileLoaderService.ALLOC_RELOAD_WAIT_MS + 10000);
     allocLoader.start();
     
@@ -525,7 +515,134 @@ public class TestAllocationFileLoaderService {
     allocLoader.setReloadListener(confHolder);
     allocLoader.reloadAllocations();
   }
-  
+
+  /**
+   * Verify that you can't include periods as the queue name in the allocations
+   * file.
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testQueueNameContainingPeriods() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"parent1.child1\">");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
+  /**
+   * Verify that you can't have the queue name with whitespace only in the
+   * allocations file.
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testQueueNameContainingOnlyWhitespace() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"      \">");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
+  @Test
+  public void testReservableQueue() throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"reservable\">");
+    out.println("<reservation>");
+    out.println("</reservation>");
+    out.println("</queue>");
+    out.println("<queue name=\"other\">");
+    out.println("</queue>");
+    out.println("<reservation-agent>DummyAgentName</reservation-agent>");
+    out.println("<reservation-policy>AnyAdmissionPolicy</reservation-policy>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+
+    AllocationConfiguration allocConf = confHolder.allocConf;
+    String reservableQueueName = "root.reservable";
+    String nonreservableQueueName = "root.other";
+    assertFalse(allocConf.isReservable(nonreservableQueueName));
+    assertTrue(allocConf.isReservable(reservableQueueName));
+
+    assertTrue(allocConf.getMoveOnExpiry(reservableQueueName));
+    assertEquals(ReservationSchedulerConfiguration.DEFAULT_RESERVATION_WINDOW,
+        allocConf.getReservationWindow(reservableQueueName));
+    assertEquals(100, allocConf.getInstantaneousMaxCapacity
+            (reservableQueueName),
+        0.0001);
+    assertEquals(
+        "DummyAgentName",
+        allocConf.getReservationAgent(reservableQueueName));
+    assertEquals(100, allocConf.getAverageCapacity(reservableQueueName), 0.001);
+    assertFalse(allocConf.getShowReservationAsQueues(reservableQueueName));
+    assertEquals("AnyAdmissionPolicy",
+        allocConf.getReservationAdmissionPolicy(reservableQueueName));
+    assertEquals(ReservationSchedulerConfiguration
+        .DEFAULT_RESERVATION_PLANNER_NAME,
+        allocConf.getReplanner(reservableQueueName));
+    assertEquals(ReservationSchedulerConfiguration
+        .DEFAULT_RESERVATION_ENFORCEMENT_WINDOW,
+        allocConf.getEnforcementWindow(reservableQueueName));
+  }
+
+  /**
+   * Verify that you can't have dynamic user queue and reservable queue on
+   * the same queue
+   */
+  @Test (expected = AllocationConfigurationException.class)
+  public void testReservableCannotBeCombinedWithDynamicUserQueue()
+      throws Exception {
+    Configuration conf = new Configuration();
+    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, ALLOC_FILE);
+
+    PrintWriter out = new PrintWriter(new FileWriter(ALLOC_FILE));
+    out.println("<?xml version=\"1.0\"?>");
+    out.println("<allocations>");
+    out.println("<queue name=\"notboth\" type=\"parent\" >");
+    out.println("<reservation>");
+    out.println("</reservation>");
+    out.println("</queue>");
+    out.println("</allocations>");
+    out.close();
+
+    AllocationFileLoaderService allocLoader = new AllocationFileLoaderService();
+    allocLoader.init(conf);
+    ReloadListener confHolder = new ReloadListener();
+    allocLoader.setReloadListener(confHolder);
+    allocLoader.reloadAllocations();
+  }
+
   private class ReloadListener implements AllocationFileLoaderService.Listener {
     public AllocationConfiguration allocConf;
     

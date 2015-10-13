@@ -30,6 +30,7 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.io.Writer;
+import java.nio.charset.Charset;
 import java.security.PrivilegedExceptionAction;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -166,17 +167,18 @@ public class AggregatedLogFormat {
     private Set<File> uploadedFiles = new HashSet<File>();
     private final Set<String> alreadyUploadedLogFiles;
     private Set<String> allExistingFileMeta = new HashSet<String>();
+    private final boolean appFinished;
     // TODO Maybe add a version string here. Instead of changing the version of
     // the entire k-v format
 
     public LogValue(List<String> rootLogDirs, ContainerId containerId,
         String user) {
-      this(rootLogDirs, containerId, user, null, new HashSet<String>());
+      this(rootLogDirs, containerId, user, null, new HashSet<String>(), true);
     }
 
     public LogValue(List<String> rootLogDirs, ContainerId containerId,
         String user, LogAggregationContext logAggregationContext,
-        Set<String> alreadyUploadedLogFiles) {
+        Set<String> alreadyUploadedLogFiles, boolean appFinished) {
       this.rootLogDirs = new ArrayList<String>(rootLogDirs);
       this.containerId = containerId;
       this.user = user;
@@ -185,6 +187,7 @@ public class AggregatedLogFormat {
       Collections.sort(this.rootLogDirs);
       this.logAggregationContext = logAggregationContext;
       this.alreadyUploadedLogFiles = alreadyUploadedLogFiles;
+      this.appFinished = appFinished;
     }
 
     private Set<File> getPendingLogFilesToUploadForThisContainer() {
@@ -263,7 +266,7 @@ public class AggregatedLogFormat {
           this.uploadedFiles.add(logFile);
         } catch (IOException e) {
           String message = logErrorMessage(logFile, e);
-          out.write(message.getBytes());
+          out.write(message.getBytes(Charset.forName("UTF-8")));
         } finally {
           IOUtils.cleanup(LOG, in);
         }
@@ -295,17 +298,15 @@ public class AggregatedLogFormat {
       }
 
       if (this.logAggregationContext != null && candidates.size() > 0) {
-        if (this.logAggregationContext.getIncludePattern() != null
-            && !this.logAggregationContext.getIncludePattern().isEmpty()) {
-          filterFiles(this.logAggregationContext.getIncludePattern(),
-              candidates, false);
-        }
+        filterFiles(
+          this.appFinished ? this.logAggregationContext.getIncludePattern()
+              : this.logAggregationContext.getRolledLogsIncludePattern(),
+          candidates, false);
 
-        if (this.logAggregationContext.getExcludePattern() != null
-            && !this.logAggregationContext.getExcludePattern().isEmpty()) {
-          filterFiles(this.logAggregationContext.getExcludePattern(),
-              candidates, true);
-        }
+        filterFiles(
+          this.appFinished ? this.logAggregationContext.getExcludePattern()
+              : this.logAggregationContext.getRolledLogsExcludePattern(),
+          candidates, true);
 
         Iterable<File> mask =
             Iterables.filter(candidates, new Predicate<File>() {
@@ -322,14 +323,15 @@ public class AggregatedLogFormat {
 
     private void filterFiles(String pattern, Set<File> candidates,
         boolean exclusion) {
-      Pattern filterPattern =
-          Pattern.compile(pattern);
-      for (Iterator<File> candidatesItr = candidates.iterator(); candidatesItr
+      if (pattern != null && !pattern.isEmpty()) {
+        Pattern filterPattern = Pattern.compile(pattern);
+        for (Iterator<File> candidatesItr = candidates.iterator(); candidatesItr
           .hasNext();) {
-        File candidate = candidatesItr.next();
-        boolean match = filterPattern.matcher(candidate.getName()).find();
-        if ((!match && !exclusion) || (match && exclusion)) {
-          candidatesItr.remove();
+          File candidate = candidatesItr.next();
+          boolean match = filterPattern.matcher(candidate.getName()).find();
+          if ((!match && !exclusion) || (match && exclusion)) {
+            candidatesItr.remove();
+          }
         }
       }
     }
@@ -377,7 +379,7 @@ public class AggregatedLogFormat {
             userUgi.doAs(new PrivilegedExceptionAction<FSDataOutputStream>() {
               @Override
               public FSDataOutputStream run() throws Exception {
-                fc = FileContext.getFileContext(conf);
+                fc = FileContext.getFileContext(remoteAppLogFile.toUri(), conf);
                 fc.setUMask(APP_LOG_FILE_UMASK);
                 return fc.create(
                     remoteAppLogFile,
@@ -469,7 +471,8 @@ public class AggregatedLogFormat {
 
     public LogReader(Configuration conf, Path remoteAppLogFile)
         throws IOException {
-      FileContext fileContext = FileContext.getFileContext(conf);
+      FileContext fileContext =
+          FileContext.getFileContext(remoteAppLogFile.toUri(), conf);
       this.fsDataIStream = fileContext.open(remoteAppLogFile);
       reader =
           new TFile.Reader(this.fsDataIStream, fileContext.getFileStatus(
@@ -486,18 +489,23 @@ public class AggregatedLogFormat {
      * @throws IOException
      */
     public String getApplicationOwner() throws IOException {
-      TFile.Reader.Scanner ownerScanner = reader.createScanner();
-      LogKey key = new LogKey();
-      while (!ownerScanner.atEnd()) {
-        TFile.Reader.Scanner.Entry entry = ownerScanner.entry();
-        key.readFields(entry.getKeyStream());
-        if (key.toString().equals(APPLICATION_OWNER_KEY.toString())) {
-          DataInputStream valueStream = entry.getValueStream();
-          return valueStream.readUTF();
+      TFile.Reader.Scanner ownerScanner = null;
+      try {
+        ownerScanner = reader.createScanner();
+        LogKey key = new LogKey();
+        while (!ownerScanner.atEnd()) {
+          TFile.Reader.Scanner.Entry entry = ownerScanner.entry();
+          key.readFields(entry.getKeyStream());
+          if (key.toString().equals(APPLICATION_OWNER_KEY.toString())) {
+            DataInputStream valueStream = entry.getValueStream();
+            return valueStream.readUTF();
+          }
+          ownerScanner.advance();
         }
-        ownerScanner.advance();
+        return null;
+      } finally {
+        IOUtils.cleanup(LOG, ownerScanner);
       }
-      return null;
     }
 
     /**
@@ -510,38 +518,42 @@ public class AggregatedLogFormat {
     public Map<ApplicationAccessType, String> getApplicationAcls()
         throws IOException {
       // TODO Seek directly to the key once a comparator is specified.
-      TFile.Reader.Scanner aclScanner = reader.createScanner();
-      LogKey key = new LogKey();
-      Map<ApplicationAccessType, String> acls =
-          new HashMap<ApplicationAccessType, String>();
-      while (!aclScanner.atEnd()) {
-        TFile.Reader.Scanner.Entry entry = aclScanner.entry();
-        key.readFields(entry.getKeyStream());
-        if (key.toString().equals(APPLICATION_ACL_KEY.toString())) {
-          DataInputStream valueStream = entry.getValueStream();
-          while (true) {
-            String appAccessOp = null;
-            String aclString = null;
-            try {
-              appAccessOp = valueStream.readUTF();
-            } catch (EOFException e) {
-              // Valid end of stream.
-              break;
+      TFile.Reader.Scanner aclScanner = null;
+      try {
+        aclScanner = reader.createScanner();
+        LogKey key = new LogKey();
+        Map<ApplicationAccessType, String> acls =
+            new HashMap<ApplicationAccessType, String>();
+        while (!aclScanner.atEnd()) {
+          TFile.Reader.Scanner.Entry entry = aclScanner.entry();
+          key.readFields(entry.getKeyStream());
+          if (key.toString().equals(APPLICATION_ACL_KEY.toString())) {
+            DataInputStream valueStream = entry.getValueStream();
+            while (true) {
+              String appAccessOp = null;
+              String aclString = null;
+              try {
+                appAccessOp = valueStream.readUTF();
+              } catch (EOFException e) {
+                // Valid end of stream.
+                break;
+              }
+              try {
+                aclString = valueStream.readUTF();
+              } catch (EOFException e) {
+                throw new YarnRuntimeException("Error reading ACLs", e);
+              }
+              acls.put(ApplicationAccessType.valueOf(appAccessOp), aclString);
             }
-            try {
-              aclString = valueStream.readUTF();
-            } catch (EOFException e) {
-              throw new YarnRuntimeException("Error reading ACLs", e);
-            }
-            acls.put(ApplicationAccessType.valueOf(appAccessOp), aclString);
           }
-
+          aclScanner.advance();
         }
-        aclScanner.advance();
+        return acls;
+      } finally {
+        IOUtils.cleanup(LOG, aclScanner);
       }
-      return acls;
     }
-    
+
     /**
      * Read the next key and return the value-stream.
      * 
@@ -651,7 +663,7 @@ public class AggregatedLogFormat {
       OutputStream os = null;
       PrintStream ps = null;
       try {
-        os = new WriterOutputStream(writer);
+        os = new WriterOutputStream(writer, Charset.forName("UTF-8"));
         ps = new PrintStream(os);
         while (true) {
           try {
@@ -709,6 +721,7 @@ public class AggregatedLogFormat {
                   pendingRead > buf.length ? buf.length : (int) pendingRead;
         len = valueStream.read(buf, 0, toRead);
       }
+      out.println("End of LogType:" + fileType);
       out.println("");
     }
 
@@ -739,6 +752,60 @@ public class AggregatedLogFormat {
         DataInputStream valueStream, PrintStream out)
           throws IOException {
       readAContainerLogsForALogType(valueStream, out, -1);
+    }
+
+    /**
+     * Keep calling this till you get a {@link EOFException} for getting logs of
+     * the specific types for a single container.
+     * @param valueStream
+     * @param out
+     * @param logUploadedTime
+     * @param logType
+     * @throws IOException
+     */
+    public static int readContainerLogsForALogType(
+        DataInputStream valueStream, PrintStream out, long logUploadedTime,
+        List<String> logType) throws IOException {
+      byte[] buf = new byte[65535];
+
+      String fileType = valueStream.readUTF();
+      String fileLengthStr = valueStream.readUTF();
+      long fileLength = Long.parseLong(fileLengthStr);
+      if (logType.contains(fileType)) {
+        out.print("LogType:");
+        out.println(fileType);
+        if (logUploadedTime != -1) {
+          out.print("Log Upload Time:");
+          out.println(Times.format(logUploadedTime));
+        }
+        out.print("LogLength:");
+        out.println(fileLengthStr);
+        out.println("Log Contents:");
+
+        long curRead = 0;
+        long pendingRead = fileLength - curRead;
+        int toRead = pendingRead > buf.length ? buf.length : (int) pendingRead;
+        int len = valueStream.read(buf, 0, toRead);
+        while (len != -1 && curRead < fileLength) {
+          out.write(buf, 0, len);
+          curRead += len;
+
+          pendingRead = fileLength - curRead;
+          toRead = pendingRead > buf.length ? buf.length : (int) pendingRead;
+          len = valueStream.read(buf, 0, toRead);
+        }
+        out.println("End of LogType:" + fileType);
+        out.println("");
+        return 0;
+      } else {
+        long totalSkipped = 0;
+        long currSkipped = 0;
+        while (currSkipped != -1 && totalSkipped < fileLength) {
+          currSkipped = valueStream.skip(fileLength - totalSkipped);
+          totalSkipped += currSkipped;
+        }
+        return -1;
+      }
     }
 
     public void close() {
@@ -781,7 +848,8 @@ public class AggregatedLogFormat {
         currentLogData =
             new BoundedInputStream(valueStream, currentLogLength);
         currentLogData.setPropagateClose(false);
-        currentLogISR = new InputStreamReader(currentLogData);
+        currentLogISR = new InputStreamReader(currentLogData,
+            Charset.forName("UTF-8"));
         currentLogType = logType;
       } catch (EOFException e) {
       }
@@ -799,6 +867,10 @@ public class AggregatedLogFormat {
 
     public long skip(long n) throws IOException {
       return currentLogData.skip(n);
+    }
+
+    public int read() throws IOException {
+      return currentLogData.read();
     }
 
     public int read(byte[] buf, int off, int len) throws IOException {

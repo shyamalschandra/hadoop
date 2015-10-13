@@ -412,11 +412,18 @@ public class RPC {
         throw ioe;
       }
 
+      if (Thread.currentThread().isInterrupted()) {
+        // interrupted during some IO; this may not have been caught
+        throw new InterruptedIOException("Interrupted waiting for the proxy");
+      }
+
       // wait for retry
       try {
         Thread.sleep(1000);
       } catch (InterruptedException ie) {
-        // IGNORE
+        Thread.currentThread().interrupt();
+        throw (IOException) new InterruptedIOException(
+            "Interrupted waiting for the proxy").initCause(ioe);
       }
     }
   }
@@ -869,9 +876,12 @@ public class RPC {
 
      getProtocolImplMap(rpcKind).put(new ProtoNameVer(protocolName, version),
          new ProtoClassProtoImpl(protocolClass, protocolImpl)); 
-     LOG.debug("RpcKind = " + rpcKind + " Protocol Name = " + protocolName +  " version=" + version +
-         " ProtocolImpl=" + protocolImpl.getClass().getName() + 
-         " protocolClass=" + protocolClass.getName());
+     if (LOG.isDebugEnabled()) {
+       LOG.debug("RpcKind = " + rpcKind + " Protocol Name = " + protocolName +
+           " version=" + version +
+           " ProtocolImpl=" + protocolImpl.getClass().getName() +
+           " protocolClass=" + protocolClass.getName());
+     }
    }
    
    static class VerProtocolImpl {

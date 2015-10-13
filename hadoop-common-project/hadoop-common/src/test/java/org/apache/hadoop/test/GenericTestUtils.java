@@ -35,12 +35,16 @@ import java.util.regex.Pattern;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.util.NativeCodeLoader;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.log4j.Layout;
+import org.apache.log4j.Level;
+import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.log4j.WriterAppender;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -54,6 +58,46 @@ import com.google.common.collect.Sets;
 public abstract class GenericTestUtils {
 
   private static final AtomicInteger sequence = new AtomicInteger();
+
+  @SuppressWarnings("unchecked")
+  public static void disableLog(Log log) {
+    // We expect that commons-logging is a wrapper around Log4j.
+    disableLog((Log4JLogger) log);
+  }
+
+  public static Logger toLog4j(org.slf4j.Logger logger) {
+    return LogManager.getLogger(logger.getName());
+  }
+
+  public static void disableLog(Log4JLogger log) {
+    log.getLogger().setLevel(Level.OFF);
+  }
+
+  public static void disableLog(Logger logger) {
+    logger.setLevel(Level.OFF);
+  }
+
+  public static void disableLog(org.slf4j.Logger logger) {
+    disableLog(toLog4j(logger));
+  }
+
+  @SuppressWarnings("unchecked")
+  public static void setLogLevel(Log log, Level level) {
+    // We expect that commons-logging is a wrapper around Log4j.
+    setLogLevel((Log4JLogger) log, level);
+  }
+
+  public static void setLogLevel(Log4JLogger log, Level level) {
+    log.getLogger().setLevel(level);
+  }
+
+  public static void setLogLevel(Logger logger, Level level) {
+    logger.setLevel(level);
+  }
+
+  public static void setLogLevel(org.slf4j.Logger logger, Level level) {
+    setLogLevel(toLog4j(logger), level);
+  }
 
   /**
    * Extracts the name of the method where the invocation has happened
@@ -367,5 +411,15 @@ public abstract class GenericTestUtils {
             Joiner.on("\n").join(info.getStackTrace()));
       }
     }
+  }
+
+  /**
+   * Skip test if native build profile of Maven is not activated.
+   * Sub-project using this must set 'runningWithNative' property to true
+   * in the definition of native profile in pom.xml.
+   */
+  public static void assumeInNativeProfile() {
+    Assume.assumeTrue(
+        Boolean.valueOf(System.getProperty("runningWithNative", "false")));
   }
 }

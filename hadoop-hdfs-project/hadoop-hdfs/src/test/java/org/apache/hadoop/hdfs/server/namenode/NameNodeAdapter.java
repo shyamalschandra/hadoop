@@ -26,6 +26,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.hadoop.fs.UnresolvedLinkException;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
@@ -63,14 +64,20 @@ public class NameNodeAdapter {
    */
   public static LocatedBlocks getBlockLocations(NameNode namenode,
       String src, long offset, long length) throws IOException {
-    return namenode.getNamesystem().getBlockLocations(
-        src, offset, length, false, true, true);
+    return namenode.getNamesystem().getBlockLocations("foo",
+        src, offset, length);
   }
   
   public static HdfsFileStatus getFileInfo(NameNode namenode, String src,
       boolean resolveLink) throws AccessControlException, UnresolvedLinkException,
         StandbyException, IOException {
-    return namenode.getNamesystem().getFileInfo(src, resolveLink);
+    namenode.getNamesystem().readLock();
+    try {
+      return FSDirStatAndListingOp.getFileInfo(namenode.getNamesystem()
+          .getFSDirectory(), src, resolveLink);
+    } finally {
+      namenode.getNamesystem().readUnlock();
+    }
   }
   
   public static boolean mkdirs(NameNode namenode, String src,
@@ -81,7 +88,7 @@ public class NameNodeAdapter {
   
   public static void saveNamespace(NameNode namenode)
       throws AccessControlException, IOException {
-    namenode.getNamesystem().saveNamespace();
+    namenode.getNamesystem().saveNamespace(0, 0);
   }
   
   public static void enterSafeMode(NameNode namenode, boolean resourcesLow)
@@ -115,7 +122,7 @@ public class NameNodeAdapter {
       DatanodeDescriptor dd, FSNamesystem namesystem) throws IOException {
     return namesystem.handleHeartbeat(nodeReg,
         BlockManagerTestUtil.getStorageReportsForDatanode(dd),
-        dd.getCacheCapacity(), dd.getCacheRemaining(), 0, 0, 0);
+        dd.getCacheCapacity(), dd.getCacheRemaining(), 0, 0, 0, null, true);
   }
 
   public static boolean setReplication(final FSNamesystem ns,
@@ -133,8 +140,19 @@ public class NameNodeAdapter {
     namesystem.leaseManager.triggerMonitorCheckNow();
   }
 
+  public static Lease getLeaseForPath(NameNode nn, String path) {
+    final FSNamesystem fsn = nn.getNamesystem();
+    INode inode;
+    try {
+      inode = fsn.getFSDirectory().getINode(path, false);
+    } catch (UnresolvedLinkException e) {
+      throw new RuntimeException("Lease manager should not support symlinks");
+    }
+    return inode == null ? null : fsn.leaseManager.getLease((INodeFile) inode);
+  }
+
   public static String getLeaseHolderForPath(NameNode namenode, String path) {
-    Lease l = namenode.getNamesystem().leaseManager.getLeaseByPath(path);
+    Lease l = getLeaseForPath(namenode, path);
     return l == null? null: l.getHolder();
   }
 
@@ -143,12 +161,8 @@ public class NameNodeAdapter {
    *   or -1 in the case that the lease doesn't exist.
    */
   public static long getLeaseRenewalTime(NameNode nn, String path) {
-    LeaseManager lm = nn.getNamesystem().leaseManager;
-    Lease l = lm.getLeaseByPath(path);
-    if (l == null) {
-      return -1;
-    }
-    return l.getLastUpdate();
+    Lease l = getLeaseForPath(nn, path);
+    return l == null ? -1 : l.getLastUpdate();
   }
 
   /**
@@ -186,7 +200,7 @@ public class NameNodeAdapter {
   
   public static FSEditLog spyOnEditLog(NameNode nn) {
     FSEditLog spyEditLog = spy(nn.getNamesystem().getFSImage().getEditLog());
-    nn.getFSImage().setEditLogForTesting(spyEditLog);
+    DFSTestUtil.setEditLogForTesting(nn.getNamesystem(), spyEditLog);
     EditLogTailer tailer = nn.getNamesystem().getEditLogTailer();
     if (tailer != null) {
       tailer.setEditLog(spyEditLog);
@@ -234,7 +248,7 @@ public class NameNodeAdapter {
    * @return Replication queue initialization status
    */
   public static boolean safeModeInitializedReplQueues(NameNode nn) {
-    return nn.getNamesystem().isPopulatingReplQueues();
+    return nn.getNamesystem().getBlockManager().isPopulatingReplQueues();
   }
   
   public static File getInProgressEditsFile(StorageDirectory sd, long startTxId) {

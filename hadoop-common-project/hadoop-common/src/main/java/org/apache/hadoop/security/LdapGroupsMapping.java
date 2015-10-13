@@ -17,8 +17,10 @@
  */
 package org.apache.hadoop.security;
 
+import java.io.FileInputStream;
 import java.io.FileReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.Reader;
 import java.util.ArrayList;
 import java.util.Hashtable;
@@ -34,6 +36,7 @@ import javax.naming.directory.InitialDirContext;
 import javax.naming.directory.SearchControls;
 import javax.naming.directory.SearchResult;
 
+import org.apache.commons.io.Charsets;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -147,6 +150,21 @@ public class LdapGroupsMapping
   public static final String GROUP_NAME_ATTR_DEFAULT = "cn";
 
   /*
+   * LDAP attribute names to use when doing posix-like lookups
+   */
+  public static final String POSIX_UID_ATTR_KEY = LDAP_CONFIG_PREFIX + ".posix.attr.uid.name";
+  public static final String POSIX_UID_ATTR_DEFAULT = "uidNumber";
+
+  public static final String POSIX_GID_ATTR_KEY = LDAP_CONFIG_PREFIX + ".posix.attr.gid.name";
+  public static final String POSIX_GID_ATTR_DEFAULT = "gidNumber";
+
+  /*
+   * Posix attributes
+   */
+  public static final String POSIX_GROUP = "posixGroup";
+  public static final String POSIX_ACCOUNT = "posixAccount";
+
+  /*
    * LDAP {@link SearchControls} attribute to set the time limit
    * for an invoked directory search. Prevents infinite wait cases.
    */
@@ -175,6 +193,9 @@ public class LdapGroupsMapping
   private String userSearchFilter;
   private String groupMemberAttr;
   private String groupNameAttr;
+  private String posixUidAttr;
+  private String posixGidAttr;
+  private boolean isPosix;
 
   public static int RECONNECT_RETRY_COUNT = 3;
   
@@ -239,15 +260,40 @@ public class LdapGroupsMapping
       SearchResult result = results.nextElement();
       String userDn = result.getNameInNamespace();
 
-      NamingEnumeration<SearchResult> groupResults =
-          ctx.search(baseDN,
-              "(&" + groupSearchFilter + "(" + groupMemberAttr + "={0}))",
-              new Object[]{userDn},
-              SEARCH_CONTROLS);
-      while (groupResults.hasMoreElements()) {
-        SearchResult groupResult = groupResults.nextElement();
-        Attribute groupName = groupResult.getAttributes().get(groupNameAttr);
-        groups.add(groupName.get().toString());
+      NamingEnumeration<SearchResult> groupResults = null;
+
+      if (isPosix) {
+        String gidNumber = null;
+        String uidNumber = null;
+        Attribute gidAttribute = result.getAttributes().get(posixGidAttr);
+        Attribute uidAttribute = result.getAttributes().get(posixUidAttr);
+        if (gidAttribute != null) {
+          gidNumber = gidAttribute.get().toString();
+        }
+        if (uidAttribute != null) {
+          uidNumber = uidAttribute.get().toString();
+        }
+        if (uidNumber != null && gidNumber != null) {
+          groupResults =
+              ctx.search(baseDN,
+                  "(&"+ groupSearchFilter + "(|(" + posixGidAttr + "={0})" +
+                      "(" + groupMemberAttr + "={1})))",
+                  new Object[] { gidNumber, uidNumber },
+                  SEARCH_CONTROLS);
+        }
+      } else {
+        groupResults =
+            ctx.search(baseDN,
+                "(&" + groupSearchFilter + "(" + groupMemberAttr + "={0}))",
+                new Object[]{userDn},
+                SEARCH_CONTROLS);
+      }
+      if (groupResults != null) {
+        while (groupResults.hasMoreElements()) {
+          SearchResult groupResult = groupResults.nextElement();
+          Attribute groupName = groupResult.getAttributes().get(groupNameAttr);
+          groups.add(groupName.get().toString());
+        }
       }
     }
 
@@ -331,13 +377,23 @@ public class LdapGroupsMapping
         conf.get(GROUP_SEARCH_FILTER_KEY, GROUP_SEARCH_FILTER_DEFAULT);
     userSearchFilter =
         conf.get(USER_SEARCH_FILTER_KEY, USER_SEARCH_FILTER_DEFAULT);
+    isPosix = groupSearchFilter.contains(POSIX_GROUP) && userSearchFilter
+        .contains(POSIX_ACCOUNT);
     groupMemberAttr =
         conf.get(GROUP_MEMBERSHIP_ATTR_KEY, GROUP_MEMBERSHIP_ATTR_DEFAULT);
     groupNameAttr =
         conf.get(GROUP_NAME_ATTR_KEY, GROUP_NAME_ATTR_DEFAULT);
+    posixUidAttr =
+        conf.get(POSIX_UID_ATTR_KEY, POSIX_UID_ATTR_DEFAULT);
+    posixGidAttr =
+        conf.get(POSIX_GID_ATTR_KEY, POSIX_GID_ATTR_DEFAULT);
 
     int dirSearchTimeout = conf.getInt(DIRECTORY_SEARCH_TIMEOUT, DIRECTORY_SEARCH_TIMEOUT_DEFAULT);
     SEARCH_CONTROLS.setTimeLimit(dirSearchTimeout);
+    // Limit the attributes returned to only those required to speed up the search.
+    // See HADOOP-10626 and HADOOP-12001 for more details.
+    SEARCH_CONTROLS.setReturningAttributes(
+        new String[] {groupNameAttr, posixUidAttr, posixGidAttr});
 
     this.conf = conf;
   }
@@ -366,11 +422,10 @@ public class LdapGroupsMapping
       // an anonymous bind
       return "";
     }
-    
-    Reader reader = null;
-    try {
-      StringBuilder password = new StringBuilder();
-      reader = new FileReader(pwFile);
+
+    StringBuilder password = new StringBuilder();
+    try (Reader reader = new InputStreamReader(
+        new FileInputStream(pwFile), Charsets.UTF_8)) {
       int c = reader.read();
       while (c > -1) {
         password.append((char)c);
@@ -379,8 +434,6 @@ public class LdapGroupsMapping
       return password.toString().trim();
     } catch (IOException ioe) {
       throw new RuntimeException("Could not read password file: " + pwFile, ioe);
-    } finally {
-      IOUtils.cleanup(LOG, reader);
     }
   }
 }

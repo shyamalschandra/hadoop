@@ -24,17 +24,29 @@ import java.util.Map;
 import java.util.Set;
 
 import org.apache.commons.lang.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueState;
+import org.apache.hadoop.yarn.api.records.QueueStatistics;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
+import org.apache.hadoop.yarn.security.AccessType;
+import org.apache.hadoop.yarn.security.PrivilegedEntity;
+import org.apache.hadoop.yarn.security.PrivilegedEntity.EntityType;
+import org.apache.hadoop.yarn.security.YarnAuthorizationProvider;
 import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceLimits;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceUsage;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedContainerChangeRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.Resources;
@@ -42,123 +54,104 @@ import org.apache.hadoop.yarn.util.resource.Resources;
 import com.google.common.collect.Sets;
 
 public abstract class AbstractCSQueue implements CSQueue {
-  
+  private static final Log LOG = LogFactory.getLog(AbstractCSQueue.class);  
   CSQueue parent;
   final String queueName;
-  
-  float capacity;
-  float maximumCapacity;
-  float absoluteCapacity;
-  float absoluteMaxCapacity;
-  float absoluteUsedCapacity = 0.0f;
-
-  float usedCapacity = 0.0f;
   volatile int numContainers;
   
   final Resource minimumAllocation;
-  final Resource maximumAllocation;
+  volatile Resource maximumAllocation;
   QueueState state;
-  final QueueMetrics metrics;
-  
+  final CSQueueMetrics metrics;
+  protected final PrivilegedEntity queueEntity;
+
   final ResourceCalculator resourceCalculator;
   Set<String> accessibleLabels;
   RMNodeLabelsManager labelManager;
   String defaultLabelExpression;
-  Resource usedResources = Resources.createResource(0, 0);
-  QueueInfo queueInfo;
-  Map<String, Float> absoluteCapacityByNodeLabels;
-  Map<String, Float> capacitiyByNodeLabels;
-  Map<String, Resource> usedResourcesByNodeLabels = new HashMap<String, Resource>();
-  Map<String, Float> absoluteMaxCapacityByNodeLabels;
-  Map<String, Float> maxCapacityByNodeLabels;
   
-  Map<QueueACL, AccessControlList> acls = 
-      new HashMap<QueueACL, AccessControlList>();
-  boolean reservationsContinueLooking;
+  Map<AccessType, AccessControlList> acls = 
+      new HashMap<AccessType, AccessControlList>();
+  volatile boolean reservationsContinueLooking;
+  private boolean preemptionDisabled;
+
+  // Track resource usage-by-label like used-resource/pending-resource, etc.
+  volatile ResourceUsage queueUsage;
   
+  // Track capacities like used-capcity/abs-used-capacity/capacity/abs-capacity,
+  // etc.
+  QueueCapacities queueCapacities;
+
   private final RecordFactory recordFactory = 
       RecordFactoryProvider.getRecordFactory(null);
-  
+  protected CapacitySchedulerContext csContext;
+  protected YarnAuthorizationProvider authorizer = null;
+
   public AbstractCSQueue(CapacitySchedulerContext cs, 
       String queueName, CSQueue parent, CSQueue old) throws IOException {
-    this.minimumAllocation = cs.getMinimumResourceCapability();
-    this.maximumAllocation = cs.getMaximumResourceCapability();
     this.labelManager = cs.getRMContext().getNodeLabelManager();
     this.parent = parent;
     this.queueName = queueName;
     this.resourceCalculator = cs.getResourceCalculator();
-    this.queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
     
     // must be called after parent and queueName is set
-    this.metrics = old != null ? old.getMetrics() :
-        QueueMetrics.forQueue(getQueuePath(), parent,
-            cs.getConfiguration().getEnableUserMetrics(),
-            cs.getConf());
-    
-    // get labels
-    this.accessibleLabels = cs.getConfiguration().getAccessibleNodeLabels(getQueuePath());
-    this.defaultLabelExpression = cs.getConfiguration()
-        .getDefaultNodeLabelExpression(getQueuePath());
-    
-    this.queueInfo.setQueueName(queueName);
-    
-    // inherit from parent if labels not set
-    if (this.accessibleLabels == null && parent != null) {
-      this.accessibleLabels = parent.getAccessibleNodeLabels();
-    }
-    SchedulerUtils.checkIfLabelInClusterNodeLabels(labelManager,
-        this.accessibleLabels);
-    
-    // inherit from parent if labels not set
-    if (this.defaultLabelExpression == null && parent != null
-        && this.accessibleLabels.containsAll(parent.getAccessibleNodeLabels())) {
-      this.defaultLabelExpression = parent.getDefaultNodeLabelExpression();
-    }
-    
-    // set capacity by labels
-    capacitiyByNodeLabels =
-        cs.getConfiguration().getNodeLabelCapacities(getQueuePath(), accessibleLabels,
-            labelManager);
+    this.metrics =
+        old != null ? (CSQueueMetrics) old.getMetrics() : CSQueueMetrics
+            .forQueue(getQueuePath(), parent, cs.getConfiguration()
+                .getEnableUserMetrics(), cs.getConf());
 
-    // set maximum capacity by labels
-    maxCapacityByNodeLabels =
-        cs.getConfiguration().getMaximumNodeLabelCapacities(getQueuePath(),
-            accessibleLabels, labelManager);
+    this.csContext = cs;
+    this.minimumAllocation = csContext.getMinimumResourceCapability();
+    
+    // initialize ResourceUsage
+    queueUsage = new ResourceUsage();
+    queueEntity = new PrivilegedEntity(EntityType.QUEUE, getQueuePath());
+    
+    // initialize QueueCapacities
+    queueCapacities = new QueueCapacities(parent == null);    
+  }
+  
+  protected void setupConfigurableCapacities() {
+    CSQueueUtils.loadUpdateAndCheckCapacities(
+        getQueuePath(),
+        csContext.getConfiguration(), 
+        queueCapacities,
+        parent == null ? null : parent.getQueueCapacities());
   }
   
   @Override
   public synchronized float getCapacity() {
-    return capacity;
+    return queueCapacities.getCapacity();
   }
 
   @Override
   public synchronized float getAbsoluteCapacity() {
-    return absoluteCapacity;
+    return queueCapacities.getAbsoluteCapacity();
   }
 
   @Override
   public float getAbsoluteMaximumCapacity() {
-    return absoluteMaxCapacity;
+    return queueCapacities.getAbsoluteMaximumCapacity();
   }
 
   @Override
   public synchronized float getAbsoluteUsedCapacity() {
-    return absoluteUsedCapacity;
+    return queueCapacities.getAbsoluteUsedCapacity();
   }
 
   @Override
   public float getMaximumCapacity() {
-    return maximumCapacity;
+    return queueCapacities.getMaximumCapacity();
   }
 
   @Override
   public synchronized float getUsedCapacity() {
-    return usedCapacity;
+    return queueCapacities.getUsedCapacity();
   }
 
   @Override
-  public synchronized Resource getUsedResources() {
-    return usedResources;
+  public Resource getUsedResources() {
+    return queueUsage.getUsed();
   }
 
   public synchronized int getNumContainers() {
@@ -171,7 +164,7 @@ public abstract class AbstractCSQueue implements CSQueue {
   }
   
   @Override
-  public QueueMetrics getMetrics() {
+  public CSQueueMetrics getMetrics() {
     return metrics;
   }
   
@@ -179,7 +172,11 @@ public abstract class AbstractCSQueue implements CSQueue {
   public String getQueueName() {
     return queueName;
   }
-  
+
+  public PrivilegedEntity getPrivilegedEntity() {
+    return queueEntity;
+  }
+
   @Override
   public synchronized CSQueue getParent() {
     return parent;
@@ -193,30 +190,21 @@ public abstract class AbstractCSQueue implements CSQueue {
   public Set<String> getAccessibleNodeLabels() {
     return accessibleLabels;
   }
-  
+
   @Override
   public boolean hasAccess(QueueACL acl, UserGroupInformation user) {
-    synchronized (this) {
-      if (acls.get(acl).isUserAllowed(user)) {
-        return true;
-      }
-    }
-    
-    if (parent != null) {
-      return parent.hasAccess(acl, user);
-    }
-    
-    return false;
+    return authorizer.checkPermission(SchedulerUtils.toAccessType(acl),
+      queueEntity, user);
   }
-  
+
   @Override
   public synchronized void setUsedCapacity(float usedCapacity) {
-    this.usedCapacity = usedCapacity;
+    queueCapacities.setUsedCapacity(usedCapacity);
   }
   
   @Override
   public synchronized void setAbsoluteUsedCapacity(float absUsedCapacity) {
-    this.absoluteUsedCapacity = absUsedCapacity;
+    queueCapacities.setAbsoluteUsedCapacity(absUsedCapacity);
   }
 
   /**
@@ -225,21 +213,16 @@ public abstract class AbstractCSQueue implements CSQueue {
    */
   synchronized void setMaxCapacity(float maximumCapacity) {
     // Sanity check
-    CSQueueUtils.checkMaxCapacity(getQueueName(), capacity, maximumCapacity);
+    CSQueueUtils.checkMaxCapacity(getQueueName(),
+        queueCapacities.getCapacity(), maximumCapacity);
     float absMaxCapacity =
         CSQueueUtils.computeAbsoluteMaximumCapacity(maximumCapacity, parent);
-    CSQueueUtils.checkAbsoluteCapacity(getQueueName(), absoluteCapacity,
+    CSQueueUtils.checkAbsoluteCapacity(getQueueName(),
+        queueCapacities.getAbsoluteCapacity(),
         absMaxCapacity);
     
-    this.maximumCapacity = maximumCapacity;
-    this.absoluteMaxCapacity = absMaxCapacity;
-  }
-
-  @Override
-  public float getAbsActualCapacity() {
-    // for now, simply return actual capacity = guaranteed capacity for parent
-    // queue
-    return absoluteCapacity;
+    queueCapacities.setMaximumCapacity(maximumCapacity);
+    queueCapacities.setAbsoluteMaximumCapacity(absMaxCapacity);
   }
 
   @Override
@@ -247,49 +230,40 @@ public abstract class AbstractCSQueue implements CSQueue {
     return defaultLabelExpression;
   }
   
-  synchronized void setupQueueConfigs(Resource clusterResource, float capacity,
-      float absoluteCapacity, float maximumCapacity, float absoluteMaxCapacity,
-      QueueState state, Map<QueueACL, AccessControlList> acls,
-      Set<String> labels, String defaultLabelExpression,
-      Map<String, Float> nodeLabelCapacities,
-      Map<String, Float> maximumNodeLabelCapacities,
-      boolean reservationContinueLooking)
+  synchronized void setupQueueConfigs(Resource clusterResource)
       throws IOException {
-    // Sanity check
-    CSQueueUtils.checkMaxCapacity(getQueueName(), capacity, maximumCapacity);
-    CSQueueUtils.checkAbsoluteCapacity(getQueueName(), absoluteCapacity,
-        absoluteMaxCapacity);
+    // get labels
+    this.accessibleLabels =
+        csContext.getConfiguration().getAccessibleNodeLabels(getQueuePath());
+    this.defaultLabelExpression = csContext.getConfiguration()
+        .getDefaultNodeLabelExpression(getQueuePath());
 
-    this.capacity = capacity;
-    this.absoluteCapacity = absoluteCapacity;
+    // inherit from parent if labels not set
+    if (this.accessibleLabels == null && parent != null) {
+      this.accessibleLabels = parent.getAccessibleNodeLabels();
+    }
+    
+    // inherit from parent if labels not set
+    if (this.defaultLabelExpression == null && parent != null
+        && this.accessibleLabels.containsAll(parent.getAccessibleNodeLabels())) {
+      this.defaultLabelExpression = parent.getDefaultNodeLabelExpression();
+    }
 
-    this.maximumCapacity = maximumCapacity;
-    this.absoluteMaxCapacity = absoluteMaxCapacity;
-
-    this.state = state;
-
-    this.acls = acls;
+    // After we setup labels, we can setup capacities
+    setupConfigurableCapacities();
     
-    // set labels
-    this.accessibleLabels = labels;
+    this.maximumAllocation =
+        csContext.getConfiguration().getMaximumAllocationPerQueue(
+            getQueuePath());
     
-    // set label expression
-    this.defaultLabelExpression = defaultLabelExpression;
+    authorizer = YarnAuthorizationProvider.getInstance(csContext.getConf());
     
-    // copy node label capacity
-    this.capacitiyByNodeLabels = new HashMap<String, Float>(nodeLabelCapacities);
-    this.maxCapacityByNodeLabels =
-        new HashMap<String, Float>(maximumNodeLabelCapacities);
-    
-    this.queueInfo.setAccessibleNodeLabels(this.accessibleLabels);
-    this.queueInfo.setCapacity(this.capacity);
-    this.queueInfo.setMaximumCapacity(this.maximumCapacity);
-    this.queueInfo.setQueueState(this.state);
-    this.queueInfo.setDefaultNodeLabelExpression(this.defaultLabelExpression);
+    this.state = csContext.getConfiguration().getState(getQueuePath());
+    this.acls = csContext.getConfiguration().getAcls(getQueuePath());
 
     // Update metrics
-    CSQueueUtils.updateQueueStatistics(
-        resourceCalculator, this, parent, clusterResource, minimumAllocation);
+    CSQueueUtils.updateQueueStatistics(resourceCalculator, clusterResource,
+        minimumAllocation, this, labelManager, null);
     
     // Check if labels of this queue is a subset of parent queue, only do this
     // when we not root
@@ -312,22 +286,48 @@ public abstract class AbstractCSQueue implements CSQueue {
         }
       }
     }
-    
-    // calculate absolute capacity by each node label
-    this.absoluteCapacityByNodeLabels =
-        CSQueueUtils.computeAbsoluteCapacityByNodeLabels(
-            this.capacitiyByNodeLabels, parent);
-    
-    // calculate maximum capacity by each node label
-    this.absoluteMaxCapacityByNodeLabels =
-        CSQueueUtils.computeAbsoluteMaxCapacityByNodeLabels(
-            maximumNodeLabelCapacities, parent);
-    
-    // check absoluteMaximumNodeLabelCapacities is valid
-    CSQueueUtils.checkAbsoluteCapacitiesByLabel(getQueueName(),
-        absoluteCapacityByNodeLabels, absoluteCapacityByNodeLabels);
-    
-    this.reservationsContinueLooking = reservationContinueLooking;
+
+    this.reservationsContinueLooking = csContext.getConfiguration()
+        .getReservationContinueLook();
+
+    this.preemptionDisabled = isQueueHierarchyPreemptionDisabled(this);
+  }
+  
+  protected QueueInfo getQueueInfo() {
+    QueueInfo queueInfo = recordFactory.newRecordInstance(QueueInfo.class);
+    queueInfo.setQueueName(queueName);
+    queueInfo.setAccessibleNodeLabels(accessibleLabels);
+    queueInfo.setCapacity(queueCapacities.getCapacity());
+    queueInfo.setMaximumCapacity(queueCapacities.getMaximumCapacity());
+    queueInfo.setQueueState(state);
+    queueInfo.setDefaultNodeLabelExpression(defaultLabelExpression);
+    queueInfo.setCurrentCapacity(getUsedCapacity());
+    queueInfo.setQueueStatistics(getQueueStatistics());
+    return queueInfo;
+  }
+
+  public QueueStatistics getQueueStatistics() {
+    QueueStatistics stats =
+        recordFactory.newRecordInstance(QueueStatistics.class);
+    stats.setNumAppsSubmitted(getMetrics().getAppsSubmitted());
+    stats.setNumAppsRunning(getMetrics().getAppsRunning());
+    stats.setNumAppsPending(getMetrics().getAppsPending());
+    stats.setNumAppsCompleted(getMetrics().getAppsCompleted());
+    stats.setNumAppsKilled(getMetrics().getAppsKilled());
+    stats.setNumAppsFailed(getMetrics().getAppsFailed());
+    stats.setNumActiveUsers(getMetrics().getActiveUsers());
+    stats.setAvailableMemoryMB(getMetrics().getAvailableMB());
+    stats.setAllocatedMemoryMB(getMetrics().getAllocatedMB());
+    stats.setPendingMemoryMB(getMetrics().getPendingMB());
+    stats.setReservedMemoryMB(getMetrics().getReservedMB());
+    stats.setAvailableVCores(getMetrics().getAvailableVirtualCores());
+    stats.setAllocatedVCores(getMetrics().getAllocatedVirtualCores());
+    stats.setPendingVCores(getMetrics().getPendingVirtualCores());
+    stats.setReservedVCores(getMetrics().getReservedVirtualCores());
+    stats.setPendingContainers(getMetrics().getPendingContainers());
+    stats.setAllocatedContainers(getMetrics().getAllocatedContainers());
+    stats.setReservedContainers(getMetrics().getReservedContainers());
+    return stats;
   }
   
   @Private
@@ -340,101 +340,26 @@ public abstract class AbstractCSQueue implements CSQueue {
     return minimumAllocation;
   }
   
-  synchronized void allocateResource(Resource clusterResource, 
-      Resource resource, Set<String> nodeLabels) {
-    Resources.addTo(usedResources, resource);
-    
-    // Update usedResources by labels
-    if (nodeLabels == null || nodeLabels.isEmpty()) {
-      if (!usedResourcesByNodeLabels.containsKey(RMNodeLabelsManager.NO_LABEL)) {
-        usedResourcesByNodeLabels.put(RMNodeLabelsManager.NO_LABEL,
-            Resources.createResource(0));
-      }
-      Resources.addTo(usedResourcesByNodeLabels.get(RMNodeLabelsManager.NO_LABEL),
-          resource);
-    } else {
-      for (String label : Sets.intersection(accessibleLabels, nodeLabels)) {
-        if (!usedResourcesByNodeLabels.containsKey(label)) {
-          usedResourcesByNodeLabels.put(label, Resources.createResource(0));
-        }
-        Resources.addTo(usedResourcesByNodeLabels.get(label), resource);
-      }
-    }
+  synchronized void allocateResource(Resource clusterResource,
+      Resource resource, String nodePartition, boolean changeContainerResource) {
+    queueUsage.incUsed(nodePartition, resource);
 
-    ++numContainers;
-    CSQueueUtils.updateQueueStatistics(resourceCalculator, this, getParent(),
-        clusterResource, minimumAllocation);
+    if (!changeContainerResource) {
+      ++numContainers;
+    }
+    CSQueueUtils.updateQueueStatistics(resourceCalculator, clusterResource,
+        minimumAllocation, this, labelManager, nodePartition);
   }
   
   protected synchronized void releaseResource(Resource clusterResource,
-      Resource resource, Set<String> nodeLabels) {
-    // Update queue metrics
-    Resources.subtractFrom(usedResources, resource);
+      Resource resource, String nodePartition, boolean changeContainerResource) {
+    queueUsage.decUsed(nodePartition, resource);
 
-    // Update usedResources by labels
-    if (null == nodeLabels || nodeLabels.isEmpty()) {
-      if (!usedResourcesByNodeLabels.containsKey(RMNodeLabelsManager.NO_LABEL)) {
-        usedResourcesByNodeLabels.put(RMNodeLabelsManager.NO_LABEL,
-            Resources.createResource(0));
-      }
-      Resources.subtractFrom(
-          usedResourcesByNodeLabels.get(RMNodeLabelsManager.NO_LABEL), resource);
-    } else {
-      for (String label : Sets.intersection(accessibleLabels, nodeLabels)) {
-        if (!usedResourcesByNodeLabels.containsKey(label)) {
-          usedResourcesByNodeLabels.put(label, Resources.createResource(0));
-        }
-        Resources.subtractFrom(usedResourcesByNodeLabels.get(label), resource);
-      }
-    }
+    CSQueueUtils.updateQueueStatistics(resourceCalculator, clusterResource,
+        minimumAllocation, this, labelManager, nodePartition);
 
-    CSQueueUtils.updateQueueStatistics(resourceCalculator, this, getParent(),
-        clusterResource, minimumAllocation);
-    --numContainers;
-  }
-  
-  @Private
-  public float getCapacityByNodeLabel(String label) {
-    if (StringUtils.equals(label, RMNodeLabelsManager.NO_LABEL)) {
-      if (null == parent) {
-        return 1f;
-      }
-      return getCapacity();
-    }
-    
-    if (!capacitiyByNodeLabels.containsKey(label)) {
-      return 0f;
-    } else {
-      return capacitiyByNodeLabels.get(label);
-    }
-  }
-  
-  @Private
-  public float getAbsoluteCapacityByNodeLabel(String label) {
-    if (StringUtils.equals(label, RMNodeLabelsManager.NO_LABEL)) {
-      if (null == parent) {
-        return 1f; 
-      }
-      return getAbsoluteCapacity();
-    }
-    
-    if (!absoluteCapacityByNodeLabels.containsKey(label)) {
-      return 0f;
-    } else {
-      return absoluteCapacityByNodeLabels.get(label);
-    }
-  }
-  
-  @Private
-  public float getAbsoluteMaximumCapacityByNodeLabel(String label) {
-    if (StringUtils.equals(label, RMNodeLabelsManager.NO_LABEL)) {
-      return getAbsoluteMaximumCapacity();
-    }
-    
-    if (!absoluteMaxCapacityByNodeLabels.containsKey(label)) {
-      return 0f;
-    } else {
-      return absoluteMaxCapacityByNodeLabels.get(label);
+    if (!changeContainerResource) {
+      --numContainers;
     }
   }
   
@@ -444,7 +369,244 @@ public abstract class AbstractCSQueue implements CSQueue {
   }
   
   @Private
-  public Map<QueueACL, AccessControlList> getACLs() {
+  public Map<AccessType, AccessControlList> getACLs() {
     return acls;
+  }
+
+  @Private
+  public boolean getPreemptionDisabled() {
+    return preemptionDisabled;
+  }
+  
+  @Private
+  public QueueCapacities getQueueCapacities() {
+    return queueCapacities;
+  }
+  
+  @Private
+  public ResourceUsage getQueueResourceUsage() {
+    return queueUsage;
+  }
+
+  /**
+   * The specified queue is preemptable if system-wide preemption is turned on
+   * unless any queue in the <em>qPath</em> hierarchy has explicitly turned
+   * preemption off.
+   * NOTE: Preemptability is inherited from a queue's parent.
+   * 
+   * @return true if queue has preemption disabled, false otherwise
+   */
+  private boolean isQueueHierarchyPreemptionDisabled(CSQueue q) {
+    CapacitySchedulerConfiguration csConf = csContext.getConfiguration();
+    boolean systemWidePreemption =
+        csConf.getBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS,
+                       YarnConfiguration.DEFAULT_RM_SCHEDULER_ENABLE_MONITORS);
+    CSQueue parentQ = q.getParent();
+
+    // If the system-wide preemption switch is turned off, all of the queues in
+    // the qPath hierarchy have preemption disabled, so return true.
+    if (!systemWidePreemption) return true;
+
+    // If q is the root queue and the system-wide preemption switch is turned
+    // on, then q does not have preemption disabled (default=false, below)
+    // unless the preemption_disabled property is explicitly set.
+    if (parentQ == null) {
+      return csConf.getPreemptionDisabled(q.getQueuePath(), false);
+    }
+
+    // If this is not the root queue, inherit the default value for the
+    // preemption_disabled property from the parent. Preemptability will be
+    // inherited from the parent's hierarchy unless explicitly overridden at
+    // this level.
+    return csConf.getPreemptionDisabled(q.getQueuePath(),
+                                        parentQ.getPreemptionDisabled());
+  }
+  
+  private Resource getCurrentLimitResource(String nodePartition,
+      Resource clusterResource, ResourceLimits currentResourceLimits,
+      SchedulingMode schedulingMode) {
+    if (schedulingMode == SchedulingMode.RESPECT_PARTITION_EXCLUSIVITY) {
+      /*
+       * Current limit resource: For labeled resource: limit = queue-max-resource
+       * (TODO, this part need update when we support labeled-limit) For
+       * non-labeled resource: limit = min(queue-max-resource,
+       * limit-set-by-parent)
+       */
+      Resource queueMaxResource =
+          Resources.multiplyAndNormalizeDown(resourceCalculator,
+              labelManager.getResourceByLabel(nodePartition, clusterResource),
+              queueCapacities.getAbsoluteMaximumCapacity(nodePartition), minimumAllocation);
+      if (nodePartition.equals(RMNodeLabelsManager.NO_LABEL)) {
+        return Resources.min(resourceCalculator, clusterResource,
+            queueMaxResource, currentResourceLimits.getLimit());
+      }
+      return queueMaxResource;  
+    } else if (schedulingMode == SchedulingMode.IGNORE_PARTITION_EXCLUSIVITY) {
+      // When we doing non-exclusive resource allocation, maximum capacity of
+      // all queues on this label equals to total resource with the label.
+      return labelManager.getResourceByLabel(nodePartition, clusterResource);
+    }
+    
+    return Resources.none();
+  }
+  
+  synchronized boolean canAssignToThisQueue(Resource clusterResource,
+      String nodePartition, ResourceLimits currentResourceLimits,
+      Resource resourceCouldBeUnreserved, SchedulingMode schedulingMode) {
+    // Get current limited resource: 
+    // - When doing RESPECT_PARTITION_EXCLUSIVITY allocation, we will respect
+    // queues' max capacity.
+    // - When doing IGNORE_PARTITION_EXCLUSIVITY allocation, we will not respect
+    // queue's max capacity, queue's max capacity on the partition will be
+    // considered to be 100%. Which is a queue can use all resource in the
+    // partition. 
+    // Doing this because: for non-exclusive allocation, we make sure there's
+    // idle resource on the partition, to avoid wastage, such resource will be
+    // leveraged as much as we can, and preemption policy will reclaim it back
+    // when partitoned-resource-request comes back.  
+    Resource currentLimitResource =
+        getCurrentLimitResource(nodePartition, clusterResource,
+            currentResourceLimits, schedulingMode);
+
+    Resource nowTotalUsed = queueUsage.getUsed(nodePartition);
+
+    // Set headroom for currentResourceLimits
+    currentResourceLimits.setHeadroom(Resources.subtract(currentLimitResource,
+        nowTotalUsed));
+
+    if (Resources.greaterThanOrEqual(resourceCalculator, clusterResource,
+        nowTotalUsed, currentLimitResource)) {
+
+      // if reservation continous looking enabled, check to see if could we
+      // potentially use this node instead of a reserved node if the application
+      // has reserved containers.
+      // TODO, now only consider reservation cases when the node has no label
+      if (this.reservationsContinueLooking
+          && nodePartition.equals(RMNodeLabelsManager.NO_LABEL)
+          && Resources.greaterThan(resourceCalculator, clusterResource,
+              resourceCouldBeUnreserved, Resources.none())) {
+        // resource-without-reserved = used - reserved
+        Resource newTotalWithoutReservedResource =
+            Resources.subtract(nowTotalUsed, resourceCouldBeUnreserved);
+
+        // when total-used-without-reserved-resource < currentLimit, we still
+        // have chance to allocate on this node by unreserving some containers
+        if (Resources.lessThan(resourceCalculator, clusterResource,
+            newTotalWithoutReservedResource, currentLimitResource)) {
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("try to use reserved: " + getQueueName()
+                + " usedResources: " + queueUsage.getUsed()
+                + ", clusterResources: " + clusterResource
+                + ", reservedResources: " + resourceCouldBeUnreserved
+                + ", capacity-without-reserved: "
+                + newTotalWithoutReservedResource + ", maxLimitCapacity: "
+                + currentLimitResource);
+          }
+          return true;
+        }
+      }
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(getQueueName()
+            + "Check assign to queue, nodePartition="
+            + nodePartition
+            + " usedResources: "
+            + queueUsage.getUsed(nodePartition)
+            + " clusterResources: "
+            + clusterResource
+            + " currentUsedCapacity "
+            + Resources.divide(resourceCalculator, clusterResource,
+                queueUsage.getUsed(nodePartition),
+                labelManager.getResourceByLabel(nodePartition, clusterResource))
+            + " max-capacity: "
+            + queueCapacities.getAbsoluteMaximumCapacity(nodePartition) + ")");
+      }
+      return false;
+    }
+    return true;
+  }
+  
+  @Override
+  public void incPendingResource(String nodeLabel, Resource resourceToInc) {
+    if (nodeLabel == null) {
+      nodeLabel = RMNodeLabelsManager.NO_LABEL;
+    }
+    // ResourceUsage has its own lock, no addition lock needs here.
+    queueUsage.incPending(nodeLabel, resourceToInc);
+    if (null != parent) {
+      parent.incPendingResource(nodeLabel, resourceToInc);
+    }
+  }
+  
+  @Override
+  public void decPendingResource(String nodeLabel, Resource resourceToDec) {
+    if (nodeLabel == null) {
+      nodeLabel = RMNodeLabelsManager.NO_LABEL;
+    }
+    // ResourceUsage has its own lock, no addition lock needs here.
+    queueUsage.decPending(nodeLabel, resourceToDec);
+    if (null != parent) {
+      parent.decPendingResource(nodeLabel, resourceToDec);
+    }
+  }
+  
+  @Override
+  public void incUsedResource(String nodeLabel, Resource resourceToInc,
+      SchedulerApplicationAttempt application) {
+    if (nodeLabel == null) {
+      nodeLabel = RMNodeLabelsManager.NO_LABEL;
+    }
+    // ResourceUsage has its own lock, no addition lock needs here.
+    queueUsage.incUsed(nodeLabel, resourceToInc);
+    if (null != parent) {
+      parent.incUsedResource(nodeLabel, resourceToInc, null);
+    }
+  }
+
+  @Override
+  public void decUsedResource(String nodeLabel, Resource resourceToDec,
+      SchedulerApplicationAttempt application) {
+    if (nodeLabel == null) {
+      nodeLabel = RMNodeLabelsManager.NO_LABEL;
+    }
+    // ResourceUsage has its own lock, no addition lock needs here.
+    queueUsage.decUsed(nodeLabel, resourceToDec);
+    if (null != parent) {
+      parent.decUsedResource(nodeLabel, resourceToDec, null);
+    }
+  }
+
+  /**
+   * Return if the queue has pending resource on given nodePartition and
+   * schedulingMode. 
+   */
+  boolean hasPendingResourceRequest(String nodePartition, 
+      Resource cluster, SchedulingMode schedulingMode) {
+    return SchedulerUtils.hasPendingResourceRequest(resourceCalculator,
+        queueUsage, nodePartition, cluster, schedulingMode);
+  }
+  
+  public boolean accessibleToPartition(String nodePartition) {
+    // if queue's label is *, it can access any node
+    if (accessibleLabels != null
+        && accessibleLabels.contains(RMNodeLabelsManager.ANY)) {
+      return true;
+    }
+    // any queue can access to a node without label
+    if (nodePartition == null
+        || nodePartition.equals(RMNodeLabelsManager.NO_LABEL)) {
+      return true;
+    }
+    // a queue can access to a node only if it contains any label of the node
+    if (accessibleLabels != null && accessibleLabels.contains(nodePartition)) {
+      return true;
+    }
+    // sorry, you cannot access
+    return false;
+  }
+
+  @Override
+  public Priority getDefaultApplicationPriority() {
+    // TODO add dummy implementation
+    return null;
   }
 }

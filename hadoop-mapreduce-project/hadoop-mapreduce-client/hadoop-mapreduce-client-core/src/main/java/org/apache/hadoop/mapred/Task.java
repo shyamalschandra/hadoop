@@ -34,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.crypto.SecretKey;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -115,7 +116,7 @@ abstract public class Task implements Writable, Configurable {
    * BYTES_READ counter and second one is of the BYTES_WRITTEN counter.
    */
   protected static String[] getFileSystemCounterNames(String uriScheme) {
-    String scheme = uriScheme.toUpperCase();
+    String scheme = StringUtils.toUpperCase(uriScheme);
     return new String[]{scheme+"_BYTES_READ", scheme+"_BYTES_WRITTEN"};
   }
   
@@ -148,6 +149,8 @@ abstract public class Task implements Writable, Configurable {
   private String user;                            // user running the job
   private TaskAttemptID taskId;                   // unique, includes job id
   private int partition;                          // id within job
+  private byte[] encryptedSpillKey = new byte[] {0};  // Key Used to encrypt
+  // intermediate spills
   TaskStatus taskStatus;                          // current status of the task
   protected JobStatus.State jobRunStateForCleanup;
   protected boolean jobCleanup = false;
@@ -170,7 +173,7 @@ abstract public class Task implements Writable, Configurable {
     skipRanges.skipRangeIterator();
 
   private ResourceCalculatorProcessTree pTree;
-  private long initCpuCumulativeTime = 0;
+  private long initCpuCumulativeTime = ResourceCalculatorProcessTree.UNAVAILABLE;
 
   protected JobConf conf;
   protected MapOutputFile mapOutputFile;
@@ -228,6 +231,11 @@ abstract public class Task implements Writable, Configurable {
     gcUpdater = new GcTimeUpdater();
   }
 
+  @VisibleForTesting
+  void setTaskDone() {
+    taskDone.set(true);
+  }
+
   ////////////////////////////////////////////
   // Accessors
   ////////////////////////////////////////////
@@ -254,6 +262,24 @@ abstract public class Task implements Writable, Configurable {
    */
   public void setJobTokenSecret(SecretKey tokenSecret) {
     this.tokenSecret = tokenSecret;
+  }
+
+  /**
+   * Get Encrypted spill key
+   * @return encrypted spill key
+   */
+  public byte[] getEncryptedSpillKey() {
+    return encryptedSpillKey;
+  }
+
+  /**
+   * Set Encrypted spill key
+   * @param encryptedSpillKey key
+   */
+  public void setEncryptedSpillKey(byte[] encryptedSpillKey) {
+    if (encryptedSpillKey != null) {
+      this.encryptedSpillKey = encryptedSpillKey;
+    }
   }
 
   /**
@@ -486,7 +512,9 @@ abstract public class Task implements Writable, Configurable {
     out.writeBoolean(writeSkipRecs);
     out.writeBoolean(taskCleanup);
     Text.writeString(out, user);
+    out.writeInt(encryptedSpillKey.length);
     extraData.write(out);
+    out.write(encryptedSpillKey);
   }
   
   public void readFields(DataInput in) throws IOException {
@@ -511,7 +539,10 @@ abstract public class Task implements Writable, Configurable {
       setPhase(TaskStatus.Phase.CLEANUP);
     }
     user = StringInterner.weakIntern(Text.readString(in));
+    int len = in.readInt();
+    encryptedSpillKey = new byte[len];
     extraData.readFields(in);
+    in.readFully(encryptedSpillKey);
   }
 
   @Override
@@ -534,9 +565,6 @@ abstract public class Task implements Writable, Configurable {
    */
   public abstract void run(JobConf job, TaskUmbilicalProtocol umbilical)
     throws IOException, ClassNotFoundException, InterruptedException;
-
-  /** The number of milliseconds between progress reports. */
-  public static final int PROGRESS_INTERVAL = 3000;
 
   private transient Progress taskProgress = new Progress();
 
@@ -624,8 +652,9 @@ abstract public class Task implements Writable, Configurable {
      * Using AtomicBoolean since we need an atomic read & reset method. 
      */  
     private AtomicBoolean progressFlag = new AtomicBoolean(false);
-    
-    TaskReporter(Progress taskProgress,
+
+    @VisibleForTesting
+    public TaskReporter(Progress taskProgress,
                  TaskUmbilicalProtocol umbilical) {
       this.umbilical = umbilical;
       this.taskProgress = taskProgress;
@@ -712,6 +741,9 @@ abstract public class Task implements Writable, Configurable {
       int remainingRetries = MAX_RETRIES;
       // get current flag value and reset it as well
       boolean sendProgress = resetProgressFlag();
+      long taskProgressInterval =
+          conf.getLong(MRJobConfig.TASK_PROGRESS_REPORT_INTERVAL,
+                       MRJobConfig.DEFAULT_TASK_PROGRESS_REPORT_INTERVAL);
       while (!taskDone.get()) {
         synchronized (lock) {
           done = false;
@@ -724,7 +756,7 @@ abstract public class Task implements Writable, Configurable {
             if (taskDone.get()) {
               break;
             }
-            lock.wait(PROGRESS_INTERVAL);
+            lock.wait(taskProgressInterval);
           }
           if (taskDone.get()) {
             break;
@@ -859,13 +891,25 @@ abstract public class Task implements Writable, Configurable {
     }
     pTree.updateProcessTree();
     long cpuTime = pTree.getCumulativeCpuTime();
-    long pMem = pTree.getCumulativeRssmem();
-    long vMem = pTree.getCumulativeVmem();
+    long pMem = pTree.getRssMemorySize();
+    long vMem = pTree.getVirtualMemorySize();
     // Remove the CPU time consumed previously by JVM reuse
-    cpuTime -= initCpuCumulativeTime;
-    counters.findCounter(TaskCounter.CPU_MILLISECONDS).setValue(cpuTime);
-    counters.findCounter(TaskCounter.PHYSICAL_MEMORY_BYTES).setValue(pMem);
-    counters.findCounter(TaskCounter.VIRTUAL_MEMORY_BYTES).setValue(vMem);
+    if (cpuTime != ResourceCalculatorProcessTree.UNAVAILABLE &&
+        initCpuCumulativeTime != ResourceCalculatorProcessTree.UNAVAILABLE) {
+      cpuTime -= initCpuCumulativeTime;
+    }
+    
+    if (cpuTime != ResourceCalculatorProcessTree.UNAVAILABLE) {
+      counters.findCounter(TaskCounter.CPU_MILLISECONDS).setValue(cpuTime);
+    }
+    
+    if (pMem != ResourceCalculatorProcessTree.UNAVAILABLE) {
+      counters.findCounter(TaskCounter.PHYSICAL_MEMORY_BYTES).setValue(pMem);
+    }
+
+    if (vMem != ResourceCalculatorProcessTree.UNAVAILABLE) {
+      counters.findCounter(TaskCounter.VIRTUAL_MEMORY_BYTES).setValue(vMem);
+    }
   }
 
   /**

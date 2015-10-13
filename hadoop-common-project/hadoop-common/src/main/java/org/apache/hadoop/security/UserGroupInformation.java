@@ -44,9 +44,9 @@ import java.util.Set;
 
 import javax.security.auth.Subject;
 import javax.security.auth.callback.CallbackHandler;
-import javax.security.auth.kerberos.KerberosKey;
 import javax.security.auth.kerberos.KerberosPrincipal;
 import javax.security.auth.kerberos.KerberosTicket;
+import javax.security.auth.kerberos.KeyTab;
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.AppConfigurationEntry.LoginModuleControlFlag;
 import javax.security.auth.login.LoginContext;
@@ -369,7 +369,8 @@ public class UserGroupInformation {
   private static final boolean windows =
       System.getProperty("os.name").startsWith("Windows");
   private static final boolean is64Bit =
-      System.getProperty("os.arch").contains("64");
+      System.getProperty("os.arch").contains("64") ||
+      System.getProperty("os.arch").contains("s390x");
   private static final boolean aix = System.getProperty("os.name").equals("AIX");
 
   /* Return the OS login module class name */
@@ -610,20 +611,6 @@ public class UserGroupInformation {
     user.setLogin(login);
   }
 
-  private static Class<?> KEY_TAB_CLASS = KerberosKey.class;
-  static {
-    try {
-      // We use KEY_TAB_CLASS to determine if the UGI is logged in from
-      // keytab. In JDK6 and JDK7, if useKeyTab and storeKey are specified
-      // in the Krb5LoginModule, then some number of KerberosKey objects
-      // are added to the Subject's private credentials. However, in JDK8,
-      // a KeyTab object is added instead. More details in HADOOP-10786.
-      KEY_TAB_CLASS = Class.forName("javax.security.auth.kerberos.KeyTab");
-    } catch (ClassNotFoundException cnfe) {
-      // Ignore. javax.security.auth.kerberos.KeyTab does not exist in JDK6.
-    }
-  }
-
   /**
    * Create a UserGroupInformation for the given subject.
    * This does not change the subject or acquire new credentials.
@@ -632,7 +619,7 @@ public class UserGroupInformation {
   UserGroupInformation(Subject subject) {
     this.subject = subject;
     this.user = subject.getPrincipals(User.class).iterator().next();
-    this.isKeytab = !subject.getPrivateCredentials(KEY_TAB_CLASS).isEmpty();
+    this.isKeytab = !subject.getPrivateCredentials(KeyTab.class).isEmpty();
     this.isKrbTkt = !subject.getPrivateCredentials(KerberosTicket.class).isEmpty();
   }
   
@@ -879,9 +866,6 @@ public class UserGroupInformation {
         .getPrivateCredentials(KerberosTicket.class);
     for (KerberosTicket ticket : tickets) {
       if (SecurityUtil.isOriginalTGT(ticket)) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Found tgt " + ticket);
-        }
         return ticket;
       }
     }
@@ -1686,7 +1670,10 @@ public class UserGroupInformation {
       if (LOG.isDebugEnabled()) {
         LOG.debug("PrivilegedActionException as:" + this + " cause:" + cause);
       }
-      if (cause instanceof IOException) {
+      if (cause == null) {
+        throw new RuntimeException("PrivilegedActionException with no " +
+                "underlying cause. UGI [" + this + "]", pae);
+      } else if (cause instanceof IOException) {
         throw (IOException) cause;
       } else if (cause instanceof Error) {
         throw (Error) cause;

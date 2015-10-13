@@ -25,6 +25,8 @@ import java.io.DataOutputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 
 import org.apache.commons.logging.Log;
@@ -38,18 +40,19 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
-import org.apache.hadoop.io.DataInputByteBuffer;
+import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.io.IOUtils;
-import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.proto.YarnServerCommonProtos.VersionProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.AMRMTokenSecretManagerStateProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ApplicationAttemptStateDataProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ApplicationStateDataProto;
 import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.EpochProto;
+import org.apache.hadoop.yarn.proto.YarnServerResourceManagerRecoveryProtos.ReservationAllocationStateProto;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.records.Version;
 import org.apache.hadoop.yarn.server.records.impl.pb.VersionPBImpl;
@@ -62,7 +65,6 @@ import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.AM
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationAttemptStateDataPBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.ApplicationStateDataPBImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.impl.pb.EpochPBImpl;
-import org.apache.hadoop.yarn.util.ConverterUtils;
 
 import com.google.common.annotations.VisibleForTesting;
 
@@ -77,6 +79,8 @@ import com.google.common.annotations.VisibleForTesting;
  * Changes from 1.1 to 1.2, AMRMTokenSecretManager state has been saved
  * separately. The currentMasterkey and nextMasterkey have been stored.
  * Also, AMRMToken has been removed from ApplicationAttemptState.
+ *
+ * Changes from 1.2 to 1.3, Addition of ReservationSystem state.
  */
 public class FileSystemRMStateStore extends RMStateStore {
 
@@ -84,11 +88,15 @@ public class FileSystemRMStateStore extends RMStateStore {
 
   protected static final String ROOT_DIR_NAME = "FSRMStateRoot";
   protected static final Version CURRENT_VERSION_INFO = Version
-    .newInstance(1, 2);
+    .newInstance(1, 3);
   protected static final String AMRMTOKEN_SECRET_MANAGER_NODE =
       "AMRMTokenSecretManagerNode";
 
+  private static final String UNREADABLE_BY_SUPERUSER_XATTRIB =
+          "security.hdfs.unreadable.by.superuser";
   protected FileSystem fs;
+  @VisibleForTesting
+  protected Configuration fsConf;
 
   private Path rootDirPath;
   @Private
@@ -96,11 +104,17 @@ public class FileSystemRMStateStore extends RMStateStore {
   Path rmDTSecretManagerRoot;
   private Path rmAppRoot;
   private Path dtSequenceNumberPath = null;
+  private int fsNumRetries;
+  private long fsRetryInterval;
+  private boolean intermediateEncryptionEnabled =
+      YarnConfiguration.DEFAULT_YARN_INTERMEDIATE_DATA_ENCRYPTION;
 
   @VisibleForTesting
   Path fsWorkingPath;
 
   Path amrmTokenSecretManagerRoot;
+  private Path reservationRoot;
+
   @Override
   public synchronized void initInternal(Configuration conf)
       throws Exception{
@@ -110,6 +124,16 @@ public class FileSystemRMStateStore extends RMStateStore {
     rmAppRoot = new Path(rootDirPath, RM_APP_ROOT);
     amrmTokenSecretManagerRoot =
         new Path(rootDirPath, AMRMTOKEN_SECRET_MANAGER_ROOT);
+    reservationRoot = new Path(rootDirPath, RESERVATION_SYSTEM_ROOT);
+    fsNumRetries =
+        conf.getInt(YarnConfiguration.FS_RM_STATE_STORE_NUM_RETRIES,
+            YarnConfiguration.DEFAULT_FS_RM_STATE_STORE_NUM_RETRIES);
+    fsRetryInterval =
+        conf.getLong(YarnConfiguration.FS_RM_STATE_STORE_RETRY_INTERVAL_MS,
+                YarnConfiguration.DEFAULT_FS_RM_STATE_STORE_RETRY_INTERVAL_MS);
+    intermediateEncryptionEnabled =
+        conf.getBoolean(YarnConfiguration.YARN_INTERMEDIATE_DATA_ENCRYPTION,
+          YarnConfiguration.DEFAULT_YARN_INTERMEDIATE_DATA_ENCRYPTION);
   }
 
   @Override
@@ -117,22 +141,32 @@ public class FileSystemRMStateStore extends RMStateStore {
     // create filesystem only now, as part of service-start. By this time, RM is
     // authenticated with kerberos so we are good to create a file-system
     // handle.
-    Configuration conf = new Configuration(getConfig());
-    conf.setBoolean("dfs.client.retry.policy.enabled", true);
+    fsConf = new Configuration(getConfig());
+    fsConf.setBoolean("dfs.client.retry.policy.enabled", true);
     String retryPolicy =
-        conf.get(YarnConfiguration.FS_RM_STATE_STORE_RETRY_POLICY_SPEC,
+        fsConf.get(YarnConfiguration.FS_RM_STATE_STORE_RETRY_POLICY_SPEC,
           YarnConfiguration.DEFAULT_FS_RM_STATE_STORE_RETRY_POLICY_SPEC);
-    conf.set("dfs.client.retry.policy.spec", retryPolicy);
+    fsConf.set("dfs.client.retry.policy.spec", retryPolicy);
 
-    fs = fsWorkingPath.getFileSystem(conf);
-    fs.mkdirs(rmDTSecretManagerRoot);
-    fs.mkdirs(rmAppRoot);
-    fs.mkdirs(amrmTokenSecretManagerRoot);
+    String scheme = fsWorkingPath.toUri().getScheme();
+    if (scheme == null) {
+      scheme = FileSystem.getDefaultUri(fsConf).getScheme();
+    }
+    if (scheme != null) {
+      String disableCacheName = String.format("fs.%s.impl.disable.cache", scheme);
+      fsConf.setBoolean(disableCacheName, true);
+    }
+
+    fs = fsWorkingPath.getFileSystem(fsConf);
+    mkdirsWithRetries(rmDTSecretManagerRoot);
+    mkdirsWithRetries(rmAppRoot);
+    mkdirsWithRetries(amrmTokenSecretManagerRoot);
+    mkdirsWithRetries(reservationRoot);
   }
 
   @Override
   protected synchronized void closeInternal() throws Exception {
-    fs.close();
+    closeWithRetries();
   }
 
   @Override
@@ -143,9 +177,9 @@ public class FileSystemRMStateStore extends RMStateStore {
   @Override
   protected synchronized Version loadVersion() throws Exception {
     Path versionNodePath = getNodePath(rootDirPath, VERSION_NODE);
-    if (fs.exists(versionNodePath)) {
-      FileStatus status = fs.getFileStatus(versionNodePath);
-      byte[] data = readFile(versionNodePath, status.getLen());
+    FileStatus status = getFileStatusWithRetries(versionNodePath);
+    if (status != null) {
+      byte[] data = readFileWithRetries(versionNodePath, status.getLen());
       Version version =
           new VersionPBImpl(VersionProto.parseFrom(data));
       return version;
@@ -158,10 +192,10 @@ public class FileSystemRMStateStore extends RMStateStore {
     Path versionNodePath = getNodePath(rootDirPath, VERSION_NODE);
     byte[] data =
         ((VersionPBImpl) CURRENT_VERSION_INFO).getProto().toByteArray();
-    if (fs.exists(versionNodePath)) {
-      updateFile(versionNodePath, data);
+    if (existsWithRetries(versionNodePath)) {
+      updateFile(versionNodePath, data, false);
     } else {
-      writeFile(versionNodePath, data);
+      writeFileWithRetries(versionNodePath, data, false);
     }
   }
   
@@ -169,21 +203,21 @@ public class FileSystemRMStateStore extends RMStateStore {
   public synchronized long getAndIncrementEpoch() throws Exception {
     Path epochNodePath = getNodePath(rootDirPath, EPOCH_NODE);
     long currentEpoch = 0;
-    if (fs.exists(epochNodePath)) {
+    FileStatus status = getFileStatusWithRetries(epochNodePath);
+    if (status != null) {
       // load current epoch
-      FileStatus status = fs.getFileStatus(epochNodePath);
-      byte[] data = readFile(epochNodePath, status.getLen());
+      byte[] data = readFileWithRetries(epochNodePath, status.getLen());
       Epoch epoch = new EpochPBImpl(EpochProto.parseFrom(data));
       currentEpoch = epoch.getEpoch();
       // increment epoch and store it
       byte[] storeData = Epoch.newInstance(currentEpoch + 1).getProto()
           .toByteArray();
-      updateFile(epochNodePath, storeData);
+      updateFile(epochNodePath, storeData, false);
     } else {
       // initialize epoch file with 1 for the next time.
       byte[] storeData = Epoch.newInstance(currentEpoch + 1).getProto()
           .toByteArray();
-      writeFile(epochNodePath, storeData);
+      writeFileWithRetries(epochNodePath, storeData, false);
     }
     return currentEpoch;
   }
@@ -197,7 +231,22 @@ public class FileSystemRMStateStore extends RMStateStore {
     loadRMAppState(rmState);
     // recover AMRMTokenSecretManager
     loadAMRMTokenSecretManagerState(rmState);
+    // recover reservation state
+    loadReservationSystemState(rmState);
     return rmState;
+  }
+
+  private void loadReservationSystemState(RMState rmState) throws Exception {
+    try {
+      final ReservationStateFileProcessor fileProcessor = new
+          ReservationStateFileProcessor(rmState);
+      final Path rootDirectory = this.reservationRoot;
+
+      processDirectoriesOfFiles(fileProcessor, rootDirectory);
+    } catch (Exception e) {
+      LOG.error("Failed to load state.", e);
+      throw e;
+    }
   }
 
   private void loadAMRMTokenSecretManagerState(RMState rmState)
@@ -205,14 +254,14 @@ public class FileSystemRMStateStore extends RMStateStore {
     checkAndResumeUpdateOperation(amrmTokenSecretManagerRoot);
     Path amrmTokenSecretManagerStateDataDir =
         new Path(amrmTokenSecretManagerRoot, AMRMTOKEN_SECRET_MANAGER_NODE);
-    FileStatus status;
-    try {
-      status = fs.getFileStatus(amrmTokenSecretManagerStateDataDir);
-      assert status.isFile();
-    } catch (FileNotFoundException ex) {
+    FileStatus status = getFileStatusWithRetries(
+        amrmTokenSecretManagerStateDataDir);
+    if (status == null) {
       return;
     }
-    byte[] data = readFile(amrmTokenSecretManagerStateDataDir, status.getLen());
+    assert status.isFile();
+    byte[] data = readFileWithRetries(amrmTokenSecretManagerStateDataDir,
+            status.getLen());
     AMRMTokenSecretManagerStatePBImpl stateData =
         new AMRMTokenSecretManagerStatePBImpl(
           AMRMTokenSecretManagerStateProto.parseFrom(data));
@@ -223,85 +272,19 @@ public class FileSystemRMStateStore extends RMStateStore {
 
   private void loadRMAppState(RMState rmState) throws Exception {
     try {
-      List<ApplicationAttemptState> attempts =
-          new ArrayList<ApplicationAttemptState>();
+      List<ApplicationAttemptStateData> attempts = new ArrayList<>();
+      final RMAppStateFileProcessor rmAppStateFileProcessor =
+          new RMAppStateFileProcessor(rmState, attempts);
+      final Path rootDirectory = this.rmAppRoot;
 
-      for (FileStatus appDir : fs.listStatus(rmAppRoot)) {
-        checkAndResumeUpdateOperation(appDir.getPath());
-        for (FileStatus childNodeStatus : fs.listStatus(appDir.getPath())) {
-          assert childNodeStatus.isFile();
-          String childNodeName = childNodeStatus.getPath().getName();
-          if (checkAndRemovePartialRecord(childNodeStatus.getPath())) {
-            continue;
-          }
-          byte[] childData =
-              readFile(childNodeStatus.getPath(), childNodeStatus.getLen());
-          if (childNodeName.startsWith(ApplicationId.appIdStrPrefix)) {
-            // application
-            if (LOG.isDebugEnabled()) {
-              LOG.debug("Loading application from node: " + childNodeName);
-            }
-            ApplicationId appId = ConverterUtils.toApplicationId(childNodeName);
-            ApplicationStateDataPBImpl appStateData =
-                new ApplicationStateDataPBImpl(
-                  ApplicationStateDataProto.parseFrom(childData));
-            ApplicationState appState =
-                new ApplicationState(appStateData.getSubmitTime(),
-                  appStateData.getStartTime(),
-                  appStateData.getApplicationSubmissionContext(),
-                  appStateData.getUser(),
-                  appStateData.getState(),
-                  appStateData.getDiagnostics(), appStateData.getFinishTime());
-            // assert child node name is same as actual applicationId
-            assert appId.equals(appState.context.getApplicationId());
-            rmState.appState.put(appId, appState);
-          } else if (childNodeName
-            .startsWith(ApplicationAttemptId.appAttemptIdStrPrefix)) {
-            // attempt
-            if (LOG.isDebugEnabled()) {
-              LOG.debug("Loading application attempt from node: "
-                  + childNodeName);
-            }
-            ApplicationAttemptId attemptId =
-                ConverterUtils.toApplicationAttemptId(childNodeName);
-            ApplicationAttemptStateDataPBImpl attemptStateData =
-                new ApplicationAttemptStateDataPBImpl(
-                  ApplicationAttemptStateDataProto.parseFrom(childData));
-            Credentials credentials = null;
-            if (attemptStateData.getAppAttemptTokens() != null) {
-              credentials = new Credentials();
-              DataInputByteBuffer dibb = new DataInputByteBuffer();
-              dibb.reset(attemptStateData.getAppAttemptTokens());
-              credentials.readTokenStorageStream(dibb);
-            }
-            ApplicationAttemptState attemptState =
-                new ApplicationAttemptState(attemptId,
-                  attemptStateData.getMasterContainer(), credentials,
-                  attemptStateData.getStartTime(),
-                  attemptStateData.getState(),
-                  attemptStateData.getFinalTrackingUrl(),
-                  attemptStateData.getDiagnostics(),
-                  attemptStateData.getFinalApplicationStatus(),
-                  attemptStateData.getAMContainerExitStatus(),
-                  attemptStateData.getFinishTime(),
-                  attemptStateData.getMemorySeconds(),
-                  attemptStateData.getVcoreSeconds());
-
-            // assert child node name is same as application attempt id
-            assert attemptId.equals(attemptState.getAttemptId());
-            attempts.add(attemptState);
-          } else {
-            LOG.info("Unknown child node with name: " + childNodeName);
-          }
-        }
-      }
+      processDirectoriesOfFiles(rmAppStateFileProcessor, rootDirectory);
 
       // go through all attempts and add them to their apps, Ideally, each
       // attempt node must have a corresponding app node, because remove
       // directory operation remove both at the same time
-      for (ApplicationAttemptState attemptState : attempts) {
+      for (ApplicationAttemptStateData attemptState : attempts) {
         ApplicationId appId = attemptState.getAttemptId().getApplicationId();
-        ApplicationState appState = rmState.appState.get(appId);
+        ApplicationStateData appState = rmState.appState.get(appId);
         assert appState != null;
         appState.attempts.put(attemptState.getAttemptId(), attemptState);
       }
@@ -309,6 +292,29 @@ public class FileSystemRMStateStore extends RMStateStore {
     } catch (Exception e) {
       LOG.error("Failed to load state.", e);
       throw e;
+    }
+  }
+
+  private void processDirectoriesOfFiles(
+      RMStateFileProcessor rmAppStateFileProcessor, Path rootDirectory)
+    throws Exception {
+    for (FileStatus dir : listStatusWithRetries(rootDirectory)) {
+      checkAndResumeUpdateOperation(dir.getPath());
+      String dirName = dir.getPath().getName();
+      for (FileStatus fileNodeStatus : listStatusWithRetries(dir.getPath())) {
+        assert fileNodeStatus.isFile();
+        String fileName = fileNodeStatus.getPath().getName();
+        if (checkAndRemovePartialRecordWithRetries(fileNodeStatus.getPath())) {
+          continue;
+        }
+        byte[] fileData = readFileWithRetries(fileNodeStatus.getPath(),
+                fileNodeStatus.getLen());
+        // Set attribute if not already set
+        setUnreadableBySuperuserXattrib(fileNodeStatus.getPath());
+
+        rmAppStateFileProcessor.processChildNode(dirName, fileName,
+            fileData);
+      }
     }
   }
 
@@ -330,7 +336,7 @@ public class FileSystemRMStateStore extends RMStateStore {
     // If it does, the prior updateFile is failed on half way. We need to
     // complete replacing the old file first.
     FileStatus[] newChildNodes =
-        fs.listStatus(path, new PathFilter() {
+        listStatusWithRetries(path, new PathFilter() {
       @Override
       public boolean accept(Path path) {
         return path.getName().endsWith(".new");
@@ -340,7 +346,7 @@ public class FileSystemRMStateStore extends RMStateStore {
       assert newChildNodeStatus.isFile();
       String newChildNodeName = newChildNodeStatus.getPath().getName();
       String childNodeName = newChildNodeName.substring(
-          0, newChildNodeName.length() - ".new".length());
+              0, newChildNodeName.length() - ".new".length());
       Path childNodePath =
           new Path(newChildNodeStatus.getPath().getParent(), childNodeName);
       replaceFile(newChildNodeStatus.getPath(), childNodePath);
@@ -348,12 +354,12 @@ public class FileSystemRMStateStore extends RMStateStore {
   }
   private void loadRMDTSecretManagerState(RMState rmState) throws Exception {
     checkAndResumeUpdateOperation(rmDTSecretManagerRoot);
-    FileStatus[] childNodes = fs.listStatus(rmDTSecretManagerRoot);
+    FileStatus[] childNodes = listStatusWithRetries(rmDTSecretManagerRoot);
 
     for(FileStatus childNodeStatus : childNodes) {
       assert childNodeStatus.isFile();
       String childNodeName = childNodeStatus.getPath().getName();
-      if (checkAndRemovePartialRecord(childNodeStatus.getPath())) {
+      if (checkAndRemovePartialRecordWithRetries(childNodeStatus.getPath())) {
         continue;
       }
       if(childNodeName.startsWith(DELEGATION_TOKEN_SEQUENCE_NUMBER_PREFIX)) {
@@ -363,52 +369,52 @@ public class FileSystemRMStateStore extends RMStateStore {
       }
 
       Path childNodePath = getNodePath(rmDTSecretManagerRoot, childNodeName);
-      byte[] childData = readFile(childNodePath, childNodeStatus.getLen());
+      byte[] childData = readFileWithRetries(childNodePath,
+          childNodeStatus.getLen());
       ByteArrayInputStream is = new ByteArrayInputStream(childData);
-      DataInputStream fsIn = new DataInputStream(is);
-      if(childNodeName.startsWith(DELEGATION_KEY_PREFIX)){
-        DelegationKey key = new DelegationKey();
-        key.readFields(fsIn);
-        rmState.rmSecretManagerState.masterKeyState.add(key);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Loaded delegation key: keyId=" + key.getKeyId()
-              + ", expirationDate=" + key.getExpiryDate());
-        }
-      } else if (childNodeName.startsWith(DELEGATION_TOKEN_PREFIX)) {
-        RMDelegationTokenIdentifierData identifierData =
-            new RMDelegationTokenIdentifierData();
-        identifierData.readFields(fsIn);
-        RMDelegationTokenIdentifier identifier =
-            identifierData.getTokenIdentifier();
-        long renewDate = identifierData.getRenewDate();
+      try (DataInputStream fsIn = new DataInputStream(is)) {
+        if (childNodeName.startsWith(DELEGATION_KEY_PREFIX)) {
+          DelegationKey key = new DelegationKey();
+          key.readFields(fsIn);
+          rmState.rmSecretManagerState.masterKeyState.add(key);
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Loaded delegation key: keyId=" + key.getKeyId()
+                + ", expirationDate=" + key.getExpiryDate());
+          }
+        } else if (childNodeName.startsWith(DELEGATION_TOKEN_PREFIX)) {
+          RMDelegationTokenIdentifierData identifierData =
+              new RMDelegationTokenIdentifierData();
+          identifierData.readFields(fsIn);
+          RMDelegationTokenIdentifier identifier =
+              identifierData.getTokenIdentifier();
+          long renewDate = identifierData.getRenewDate();
 
-        rmState.rmSecretManagerState.delegationTokenState.put(identifier,
-          renewDate);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Loaded RMDelegationTokenIdentifier: " + identifier
-              + " renewDate=" + renewDate);
+          rmState.rmSecretManagerState.delegationTokenState.put(identifier,
+            renewDate);
+          if (LOG.isDebugEnabled()) {
+            LOG.debug("Loaded RMDelegationTokenIdentifier: " + identifier
+                + " renewDate=" + renewDate);
+          }
+        } else {
+          LOG.warn("Unknown file for recovering RMDelegationTokenSecretManager");
         }
-      } else {
-        LOG.warn("Unknown file for recovering RMDelegationTokenSecretManager");
       }
-      fsIn.close();
     }
   }
 
   @Override
   public synchronized void storeApplicationStateInternal(ApplicationId appId,
       ApplicationStateData appStateDataPB) throws Exception {
-    String appIdStr = appId.toString();
-    Path appDirPath = getAppDir(rmAppRoot, appIdStr);
-    fs.mkdirs(appDirPath);
-    Path nodeCreatePath = getNodePath(appDirPath, appIdStr);
+    Path appDirPath = getAppDir(rmAppRoot, appId);
+    mkdirsWithRetries(appDirPath);
+    Path nodeCreatePath = getNodePath(appDirPath, appId.toString());
 
     LOG.info("Storing info for app: " + appId + " at: " + nodeCreatePath);
     byte[] appStateData = appStateDataPB.getProto().toByteArray();
     try {
       // currently throw all exceptions. May need to respond differently for HA
       // based on whether we have lost the right to write to FS
-      writeFile(nodeCreatePath, appStateData);
+      writeFileWithRetries(nodeCreatePath, appStateData, true);
     } catch (Exception e) {
       LOG.info("Error storing info for app: " + appId, e);
       throw e;
@@ -418,16 +424,15 @@ public class FileSystemRMStateStore extends RMStateStore {
   @Override
   public synchronized void updateApplicationStateInternal(ApplicationId appId,
       ApplicationStateData appStateDataPB) throws Exception {
-    String appIdStr = appId.toString();
-    Path appDirPath = getAppDir(rmAppRoot, appIdStr);
-    Path nodeCreatePath = getNodePath(appDirPath, appIdStr);
+    Path appDirPath = getAppDir(rmAppRoot, appId);
+    Path nodeCreatePath = getNodePath(appDirPath, appId.toString());
 
     LOG.info("Updating info for app: " + appId + " at: " + nodeCreatePath);
     byte[] appStateData = appStateDataPB.getProto().toByteArray();
     try {
       // currently throw all exceptions. May need to respond differently for HA
       // based on whether we have lost the right to write to FS
-      updateFile(nodeCreatePath, appStateData);
+      updateFile(nodeCreatePath, appStateData, true);
     } catch (Exception e) {
       LOG.info("Error updating info for app: " + appId, e);
       throw e;
@@ -440,7 +445,7 @@ public class FileSystemRMStateStore extends RMStateStore {
       ApplicationAttemptStateData attemptStateDataPB)
       throws Exception {
     Path appDirPath =
-        getAppDir(rmAppRoot, appAttemptId.getApplicationId().toString());
+        getAppDir(rmAppRoot, appAttemptId.getApplicationId());
     Path nodeCreatePath = getNodePath(appDirPath, appAttemptId.toString());
     LOG.info("Storing info for attempt: " + appAttemptId + " at: "
         + nodeCreatePath);
@@ -448,7 +453,7 @@ public class FileSystemRMStateStore extends RMStateStore {
     try {
       // currently throw all exceptions. May need to respond differently for HA
       // based on whether we have lost the right to write to FS
-      writeFile(nodeCreatePath, attemptStateData);
+      writeFileWithRetries(nodeCreatePath, attemptStateData, true);
     } catch (Exception e) {
       LOG.info("Error storing info for attempt: " + appAttemptId, e);
       throw e;
@@ -461,7 +466,7 @@ public class FileSystemRMStateStore extends RMStateStore {
       ApplicationAttemptStateData attemptStateDataPB)
       throws Exception {
     Path appDirPath =
-        getAppDir(rmAppRoot, appAttemptId.getApplicationId().toString());
+        getAppDir(rmAppRoot, appAttemptId.getApplicationId());
     Path nodeCreatePath = getNodePath(appDirPath, appAttemptId.toString());
     LOG.info("Updating info for attempt: " + appAttemptId + " at: "
         + nodeCreatePath);
@@ -469,7 +474,7 @@ public class FileSystemRMStateStore extends RMStateStore {
     try {
       // currently throw all exceptions. May need to respond differently for HA
       // based on whether we have lost the right to write to FS
-      updateFile(nodeCreatePath, attemptStateData);
+      updateFile(nodeCreatePath, attemptStateData, true);
     } catch (Exception e) {
       LOG.info("Error updating info for attempt: " + appAttemptId, e);
       throw e;
@@ -477,42 +482,42 @@ public class FileSystemRMStateStore extends RMStateStore {
   }
 
   @Override
-  public synchronized void removeApplicationStateInternal(ApplicationState appState)
+  public synchronized void removeApplicationStateInternal(
+      ApplicationStateData appState)
       throws Exception {
-    String appId = appState.getAppId().toString();
+    ApplicationId appId =
+        appState.getApplicationSubmissionContext().getApplicationId();
     Path nodeRemovePath = getAppDir(rmAppRoot, appId);
     LOG.info("Removing info for app: " + appId + " at: " + nodeRemovePath);
-    deleteFile(nodeRemovePath);
+    deleteFileWithRetries(nodeRemovePath);
   }
 
   @Override
-  public synchronized void storeRMDelegationTokenAndSequenceNumberState(
-      RMDelegationTokenIdentifier identifier, Long renewDate,
-      int latestSequenceNumber) throws Exception {
-    storeOrUpdateRMDelegationTokenAndSequenceNumberState(
-        identifier, renewDate,latestSequenceNumber, false);
+  public synchronized void storeRMDelegationTokenState(
+      RMDelegationTokenIdentifier identifier, Long renewDate)
+      throws Exception {
+    storeOrUpdateRMDelegationTokenState(identifier, renewDate, false);
   }
 
   @Override
   public synchronized void removeRMDelegationTokenState(
       RMDelegationTokenIdentifier identifier) throws Exception {
     Path nodeCreatePath = getNodePath(rmDTSecretManagerRoot,
-      DELEGATION_TOKEN_PREFIX + identifier.getSequenceNumber());
+            DELEGATION_TOKEN_PREFIX + identifier.getSequenceNumber());
     LOG.info("Removing RMDelegationToken_" + identifier.getSequenceNumber());
-    deleteFile(nodeCreatePath);
+    deleteFileWithRetries(nodeCreatePath);
   }
 
   @Override
-  protected void updateRMDelegationTokenAndSequenceNumberInternal(
-      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate,
-      int latestSequenceNumber) throws Exception {
-    storeOrUpdateRMDelegationTokenAndSequenceNumberState(
-        rmDTIdentifier, renewDate,latestSequenceNumber, true);
+  protected synchronized void updateRMDelegationTokenState(
+      RMDelegationTokenIdentifier rmDTIdentifier, Long renewDate)
+      throws Exception {
+    storeOrUpdateRMDelegationTokenState(rmDTIdentifier, renewDate, true);
   }
 
-  private void storeOrUpdateRMDelegationTokenAndSequenceNumberState(
+  private void storeOrUpdateRMDelegationTokenState(
       RMDelegationTokenIdentifier identifier, Long renewDate,
-      int latestSequenceNumber, boolean isUpdate) throws Exception {
+      boolean isUpdate) throws Exception {
     Path nodeCreatePath =
         getNodePath(rmDTSecretManagerRoot,
           DELEGATION_TOKEN_PREFIX + identifier.getSequenceNumber());
@@ -520,27 +525,29 @@ public class FileSystemRMStateStore extends RMStateStore {
         new RMDelegationTokenIdentifierData(identifier, renewDate);
     if (isUpdate) {
       LOG.info("Updating RMDelegationToken_" + identifier.getSequenceNumber());
-      updateFile(nodeCreatePath, identifierData.toByteArray());
+      updateFile(nodeCreatePath, identifierData.toByteArray(), true);
     } else {
       LOG.info("Storing RMDelegationToken_" + identifier.getSequenceNumber());
-      writeFile(nodeCreatePath, identifierData.toByteArray());
-    }
+      writeFileWithRetries(nodeCreatePath, identifierData.toByteArray(), true);
 
-    // store sequence number
-    Path latestSequenceNumberPath = getNodePath(rmDTSecretManagerRoot,
-          DELEGATION_TOKEN_SEQUENCE_NUMBER_PREFIX + latestSequenceNumber);
-    LOG.info("Storing " + DELEGATION_TOKEN_SEQUENCE_NUMBER_PREFIX
-        + latestSequenceNumber);
-    if (dtSequenceNumberPath == null) {
-      if (!createFile(latestSequenceNumberPath)) {
-        throw new Exception("Failed to create " + latestSequenceNumberPath);
+      // store sequence number
+      Path latestSequenceNumberPath = getNodePath(rmDTSecretManagerRoot,
+            DELEGATION_TOKEN_SEQUENCE_NUMBER_PREFIX
+            + identifier.getSequenceNumber());
+      LOG.info("Storing " + DELEGATION_TOKEN_SEQUENCE_NUMBER_PREFIX
+          + identifier.getSequenceNumber());
+      if (dtSequenceNumberPath == null) {
+        if (!createFileWithRetries(latestSequenceNumberPath)) {
+          throw new Exception("Failed to create " + latestSequenceNumberPath);
+        }
+      } else {
+        if (!renameFileWithRetries(dtSequenceNumberPath,
+            latestSequenceNumberPath)) {
+          throw new Exception("Failed to rename " + dtSequenceNumberPath);
+        }
       }
-    } else {
-      if (!renameFile(dtSequenceNumberPath, latestSequenceNumberPath)) {
-        throw new Exception("Failed to rename " + dtSequenceNumberPath);
-      }
+      dtSequenceNumberPath = latestSequenceNumberPath;
     }
-    dtSequenceNumberPath = latestSequenceNumberPath;
   }
 
   @Override
@@ -549,11 +556,11 @@ public class FileSystemRMStateStore extends RMStateStore {
     Path nodeCreatePath = getNodePath(rmDTSecretManagerRoot,
           DELEGATION_KEY_PREFIX + masterKey.getKeyId());
     ByteArrayOutputStream os = new ByteArrayOutputStream();
-    DataOutputStream fsOut = new DataOutputStream(os);
-    LOG.info("Storing RMDelegationKey_" + masterKey.getKeyId());
-    masterKey.write(fsOut);
-    writeFile(nodeCreatePath, os.toByteArray());
-    fsOut.close();
+    try (DataOutputStream fsOut = new DataOutputStream(os)) {
+      LOG.info("Storing RMDelegationKey_" + masterKey.getKeyId());
+      masterKey.write(fsOut);
+      writeFileWithRetries(nodeCreatePath, os.toByteArray(), true);
+    }
   }
 
   @Override
@@ -562,21 +569,181 @@ public class FileSystemRMStateStore extends RMStateStore {
     Path nodeCreatePath = getNodePath(rmDTSecretManagerRoot,
           DELEGATION_KEY_PREFIX + masterKey.getKeyId());
     LOG.info("Removing RMDelegationKey_"+ masterKey.getKeyId());
-    deleteFile(nodeCreatePath);
+    deleteFileWithRetries(nodeCreatePath);
   }
 
   @Override
-  public synchronized void deleteStore() throws IOException {
-    if (fs.exists(rootDirPath)) {
-      fs.delete(rootDirPath, true);
+  public synchronized void deleteStore() throws Exception {
+    if (existsWithRetries(rootDirPath)) {
+      deleteFileWithRetries(rootDirPath);
     }
   }
 
-  private Path getAppDir(Path root, String appId) {
-    return getNodePath(root, appId);
+  @Override
+  public synchronized void removeApplication(ApplicationId removeAppId)
+      throws Exception {
+    Path nodeRemovePath = getAppDir(rmAppRoot, removeAppId);
+    if (existsWithRetries(nodeRemovePath)) {
+      deleteFileWithRetries(nodeRemovePath);
+    }
   }
 
+  private Path getAppDir(Path root, ApplicationId appId) {
+    return getNodePath(root, appId.toString());
+  }
+
+  @VisibleForTesting
+  protected Path getAppDir(ApplicationId appId) {
+    return getAppDir(rmAppRoot, appId);
+  }
+
+  @VisibleForTesting
+  protected Path getAppAttemptDir(ApplicationAttemptId appAttId) {
+    return getNodePath(getAppDir(appAttId.getApplicationId()), appAttId
+            .toString());
+  }
   // FileSystem related code
+
+  private boolean checkAndRemovePartialRecordWithRetries(final Path record)
+      throws Exception {
+    return new FSAction<Boolean>() {
+      @Override
+      public Boolean run() throws Exception {
+        return checkAndRemovePartialRecord(record);
+      }
+    }.runWithRetries();
+  }
+
+  private void mkdirsWithRetries(final Path appDirPath) throws Exception {
+    new FSAction<Void>() {
+      @Override
+      public Void run() throws Exception {
+        fs.mkdirs(appDirPath);
+        return null;
+      }
+    }.runWithRetries();
+  }
+
+  private void writeFileWithRetries(final Path outputPath, final byte[] data,
+                                    final boolean makeUnreadableByAdmin)
+          throws Exception {
+    new FSAction<Void>() {
+      @Override
+      public Void run() throws Exception {
+        writeFile(outputPath, data, makeUnreadableByAdmin);
+        return null;
+      }
+    }.runWithRetries();
+  }
+
+  private void deleteFileWithRetries(final Path deletePath) throws Exception {
+    new FSAction<Void>() {
+      @Override
+      public Void run() throws Exception {
+        deleteFile(deletePath);
+        return null;
+      }
+    }.runWithRetries();
+  }
+
+  private boolean renameFileWithRetries(final Path src, final Path dst)
+      throws Exception {
+    return new FSAction<Boolean>() {
+      @Override
+      public Boolean run() throws Exception {
+        return renameFile(src, dst);
+      }
+    }.runWithRetries();
+  }
+
+  private boolean createFileWithRetries(final Path newFile) throws Exception {
+    return new FSAction<Boolean>() {
+      @Override
+      public Boolean run() throws Exception {
+        return createFile(newFile);
+      }
+    }.runWithRetries();
+  }
+
+  private FileStatus getFileStatusWithRetries(final Path path)
+      throws Exception {
+    return new FSAction<FileStatus>() {
+      @Override
+      public FileStatus run() throws Exception {
+        return getFileStatus(path);
+      }
+    }.runWithRetries();
+  }
+
+  private boolean existsWithRetries(final Path path) throws Exception {
+    return new FSAction<Boolean>() {
+      @Override
+      public Boolean run() throws Exception {
+        return fs.exists(path);
+      }
+    }.runWithRetries();
+  }
+
+  private byte[] readFileWithRetries(final Path inputPath, final long len)
+      throws Exception {
+    return new FSAction<byte[]>() {
+      @Override
+      public byte[] run() throws Exception {
+        return readFile(inputPath, len);
+      }
+    }.runWithRetries();
+  }
+
+  private FileStatus[] listStatusWithRetries(final Path path)
+      throws Exception {
+    return new FSAction<FileStatus[]>() {
+      @Override
+      public FileStatus[] run() throws Exception {
+        return fs.listStatus(path);
+      }
+    }.runWithRetries();
+  }
+
+  private FileStatus[] listStatusWithRetries(final Path path,
+      final PathFilter filter) throws Exception {
+    return new FSAction<FileStatus[]>() {
+      @Override
+      public FileStatus[] run() throws Exception {
+        return fs.listStatus(path, filter);
+      }
+    }.runWithRetries();
+  }
+
+  private void closeWithRetries() throws Exception {
+    new FSAction<Void>() {
+      @Override
+      public Void run() throws Exception {
+        IOUtils.closeStream(fs);
+        return null;
+      }
+    }.runWithRetries();
+  }
+
+  private abstract class FSAction<T> {
+    abstract T run() throws Exception;
+
+    T runWithRetries() throws Exception {
+      int retry = 0;
+      while (true) {
+        try {
+          return run();
+        } catch (IOException e) {
+          LOG.info("Exception while executing a FS operation.", e);
+          if (++retry > fsNumRetries) {
+            LOG.info("Maxed out FS retries. Giving up!");
+            throw e;
+          }
+          LOG.info("Retrying operation on FS. Retry no. " + retry);
+          Thread.sleep(fsRetryInterval);
+        }
+      }
+    }
+  }
 
   private void deleteFile(Path deletePath) throws Exception {
     if(!fs.delete(deletePath, true)) {
@@ -597,12 +764,21 @@ public class FileSystemRMStateStore extends RMStateStore {
     }
   }
 
+  private FileStatus getFileStatus(Path path) throws Exception {
+    try {
+      return fs.getFileStatus(path);
+    } catch (FileNotFoundException e) {
+      return null;
+    }
+  }
+
   /*
    * In order to make this write atomic as a part of write we will first write
    * data to .tmp file and then rename it. Here we are assuming that rename is
    * atomic for underlying file system.
    */
-  private void writeFile(Path outputPath, byte[] data) throws Exception {
+  protected void writeFile(Path outputPath, byte[] data, boolean
+          makeUnradableByAdmin) throws Exception {
     Path tempPath =
         new Path(outputPath.getParent(), outputPath.getName() + ".tmp");
     FSDataOutputStream fsOut = null;
@@ -610,6 +786,9 @@ public class FileSystemRMStateStore extends RMStateStore {
     // final status.
     try {
       fsOut = fs.create(tempPath, true);
+      if (makeUnradableByAdmin) {
+        setUnreadableBySuperuserXattrib(tempPath);
+      }
       fsOut.write(data);
       fsOut.close();
       fsOut = null;
@@ -624,20 +803,21 @@ public class FileSystemRMStateStore extends RMStateStore {
    * data to .new file and then rename it. Here we are assuming that rename is
    * atomic for underlying file system.
    */
-  protected void updateFile(Path outputPath, byte[] data) throws Exception {
+  protected void updateFile(Path outputPath, byte[] data, boolean
+          makeUnradableByAdmin) throws Exception {
     Path newPath = new Path(outputPath.getParent(), outputPath.getName() + ".new");
-    // use writeFile to make sure .new file is created atomically
-    writeFile(newPath, data);
+    // use writeFileWithRetries to make sure .new file is created atomically
+    writeFileWithRetries(newPath, data, makeUnradableByAdmin);
     replaceFile(newPath, outputPath);
   }
 
   protected void replaceFile(Path srcPath, Path dstPath) throws Exception {
-    if (fs.exists(dstPath)) {
-      deleteFile(dstPath);
+    if (existsWithRetries(dstPath)) {
+      deleteFileWithRetries(dstPath);
     } else {
       LOG.info("File doesn't exist. Skip deleting the file " + dstPath);
     }
-    fs.rename(srcPath, dstPath);
+    renameFileWithRetries(srcPath, dstPath);
   }
 
   @Private
@@ -658,23 +838,143 @@ public class FileSystemRMStateStore extends RMStateStore {
 
   @Override
   public synchronized void storeOrUpdateAMRMTokenSecretManagerState(
-      AMRMTokenSecretManagerState amrmTokenSecretManagerState,
-      boolean isUpdate){
+      AMRMTokenSecretManagerState amrmTokenSecretManagerState, boolean isUpdate)
+      throws Exception {
     Path nodeCreatePath =
         getNodePath(amrmTokenSecretManagerRoot, AMRMTOKEN_SECRET_MANAGER_NODE);
     AMRMTokenSecretManagerState data =
         AMRMTokenSecretManagerState.newInstance(amrmTokenSecretManagerState);
     byte[] stateData = data.getProto().toByteArray();
-    try {
-      if (isUpdate) {
-        updateFile(nodeCreatePath, stateData);
-      } else {
-        writeFile(nodeCreatePath, stateData);
-      }
-    } catch (Exception ex) {
-      LOG.info("Error storing info for AMRMTokenSecretManager", ex);
-      notifyStoreOperationFailed(ex);
+    if (isUpdate) {
+      updateFile(nodeCreatePath, stateData, true);
+    } else {
+      writeFileWithRetries(nodeCreatePath, stateData, true);
     }
   }
 
+  @Override
+  protected void storeReservationState(
+      ReservationAllocationStateProto reservationAllocation, String planName,
+      String reservationIdName) throws Exception {
+    Path planCreatePath = getNodePath(reservationRoot, planName);
+    mkdirsWithRetries(planCreatePath);
+    Path reservationPath = getNodePath(planCreatePath, reservationIdName);
+    LOG.info("Storing state for reservation " + reservationIdName + " from " +
+        "plan " + planName + " at path " + reservationPath);
+    byte[] reservationData = reservationAllocation.toByteArray();
+    writeFileWithRetries(reservationPath, reservationData, true);
+  }
+
+  @Override
+  protected void updateReservationState(
+      ReservationAllocationStateProto reservationAllocation, String planName,
+      String reservationIdName) throws Exception {
+    Path planCreatePath = getNodePath(reservationRoot, planName);
+    Path reservationPath = getNodePath(planCreatePath, reservationIdName);
+    LOG.info("Updating state for reservation " + reservationIdName + " from " +
+        "plan " + planName + " at path " + reservationPath);
+    byte[] reservationData = reservationAllocation.toByteArray();
+    updateFile(reservationPath, reservationData, true);
+  }
+
+  @Override
+  protected void removeReservationState(
+      String planName, String reservationIdName) throws Exception {
+    Path planCreatePath = getNodePath(reservationRoot, planName);
+    Path reservationPath = getNodePath(planCreatePath, reservationIdName);
+    LOG.info("Removing state for reservation " + reservationIdName + " from " +
+        "plan " + planName + " at path " + reservationPath);
+    deleteFileWithRetries(reservationPath);
+  }
+
+  @VisibleForTesting
+  public int getNumRetries() {
+    return fsNumRetries;
+  }
+
+  @VisibleForTesting
+  public long getRetryInterval() {
+    return fsRetryInterval;
+  }
+
+  private void setUnreadableBySuperuserXattrib(Path p) throws IOException {
+    if (fs.getScheme().toLowerCase().contains("hdfs")
+        && intermediateEncryptionEnabled
+        && !fs.getXAttrs(p).containsKey(UNREADABLE_BY_SUPERUSER_XATTRIB)) {
+      fs.setXAttr(p, UNREADABLE_BY_SUPERUSER_XATTRIB, null,
+        EnumSet.of(XAttrSetFlag.CREATE));
+    }
+  }
+
+  private static class ReservationStateFileProcessor implements
+      RMStateFileProcessor {
+    private RMState rmState;
+    public ReservationStateFileProcessor(RMState state) {
+      this.rmState = state;
+    }
+
+    @Override
+    public void processChildNode(String planName, String childNodeName,
+        byte[] childData) throws IOException {
+      ReservationAllocationStateProto allocationState =
+          ReservationAllocationStateProto.parseFrom(childData);
+      if (!rmState.getReservationState().containsKey(planName)) {
+        rmState.getReservationState().put(planName,
+            new HashMap<ReservationId, ReservationAllocationStateProto>());
+      }
+      ReservationId reservationId =
+          ReservationId.parseReservationId(childNodeName);
+      rmState.getReservationState().get(planName).put(reservationId,
+          allocationState);
+    }
+  }
+
+  private static class RMAppStateFileProcessor implements RMStateFileProcessor {
+    private RMState rmState;
+    private List<ApplicationAttemptStateData> attempts;
+
+    public RMAppStateFileProcessor(RMState rmState,
+        List<ApplicationAttemptStateData> attempts) {
+      this.rmState = rmState;
+      this.attempts = attempts;
+    }
+
+    @Override
+    public void processChildNode(String appDirName, String childNodeName,
+        byte[] childData)
+        throws com.google.protobuf.InvalidProtocolBufferException {
+      if (childNodeName.startsWith(ApplicationId.appIdStrPrefix)) {
+        // application
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Loading application from node: " + childNodeName);
+        }
+        ApplicationStateDataPBImpl appState =
+            new ApplicationStateDataPBImpl(
+                ApplicationStateDataProto.parseFrom(childData));
+        ApplicationId appId =
+            appState.getApplicationSubmissionContext().getApplicationId();
+        rmState.appState.put(appId, appState);
+      } else if (childNodeName.startsWith(
+          ApplicationAttemptId.appAttemptIdStrPrefix)) {
+        // attempt
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Loading application attempt from node: "
+              + childNodeName);
+        }
+        ApplicationAttemptStateDataPBImpl attemptState =
+            new ApplicationAttemptStateDataPBImpl(
+                ApplicationAttemptStateDataProto.parseFrom(childData));
+        attempts.add(attemptState);
+      } else {
+        LOG.info("Unknown child node with name: " + childNodeName);
+      }
+    }
+  }
+
+  // Interface for common state processing of directory of file layout
+  private interface RMStateFileProcessor {
+    void processChildNode(String appDirName, String childNodeName,
+        byte[] childData)
+        throws IOException;
+  }
 }

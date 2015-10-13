@@ -48,7 +48,6 @@ import com.google.common.io.Files;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -109,7 +108,7 @@ import com.google.common.primitives.Ints;
 public class TestCheckpoint {
 
   static {
-    ((Log4JLogger)FSImage.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(FSImage.LOG, Level.ALL);
   }
 
   static final Log LOG = LogFactory.getLog(TestCheckpoint.class); 
@@ -633,6 +632,22 @@ public class TestCheckpoint {
         });
   }
 
+  private void checkTempImages(NNStorage storage) throws IOException {
+    List<File> dirs = new ArrayList<File>();
+    dirs.add(storage.getStorageDir(0).getCurrentDir());
+    dirs.add(storage.getStorageDir(1).getCurrentDir());
+
+    for (File dir : dirs) {
+      File[] list = dir.listFiles();
+      for (File f : list) {
+        // Throw an exception if a temp image file is found.
+        if(f.getName().contains(NNStorage.NameNodeFile.IMAGE_NEW.getName())) {
+          throw new IOException("Found " + f);
+        }
+      }
+    }
+  }
+
   /**
    * Simulate 2NN failing to send the whole file (error type 3)
    * The length header in the HTTP transfer should prevent
@@ -694,6 +709,9 @@ public class TestCheckpoint {
         GenericTestUtils.assertExceptionContains(exceptionSubstring, e);
       }
       Mockito.reset(faultInjector);
+      // Make sure there is no temporary files left around.
+      checkTempImages(cluster.getNameNode().getFSImage().getStorage());
+      checkTempImages(secondary.getFSImage().getStorage());
       secondary.shutdown(); // secondary namenode crash!
       secondary = null;
 
@@ -1409,7 +1427,8 @@ public class TestCheckpoint {
       //
       secondary = startSecondaryNameNode(conf);
 
-      File secondaryDir = new File(MiniDFSCluster.getBaseDirectory(), "namesecondary1");
+      File secondaryDir = MiniDFSCluster.getCheckpointDirectory(MiniDFSCluster.getBaseDirectory(),
+        0, 0)[0];
       File secondaryCurrent = new File(secondaryDir, "current");
 
       long expectedTxIdToDownload = cluster.getNameNode().getFSImage()
@@ -1588,7 +1607,7 @@ public class TestCheckpoint {
       // Make sure the on-disk fsimage on the NN has txid > 0.
       FSNamesystem fsns = cluster.getNamesystem();
       fsns.enterSafeMode(false);
-      fsns.saveNamespace();
+      fsns.saveNamespace(0, 0);
       fsns.leaveSafeMode();
       
       secondary = startSecondaryNameNode(conf);
@@ -2220,7 +2239,7 @@ public class TestCheckpoint {
       NamenodeProtocols nn = cluster.getNameNodeRpc();
       nn.setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
       for (int i = 0; i < 3; i++) {
-        nn.saveNamespace();
+        nn.saveNamespace(0, 0);
       }
       nn.setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
       
@@ -2305,7 +2324,7 @@ public class TestCheckpoint {
       // therefore needs to download a new fsimage the next time it performs a
       // checkpoint.
       cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
-      cluster.getNameNodeRpc().saveNamespace();
+      cluster.getNameNodeRpc().saveNamespace(0, 0);
       cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
       
       // Ensure that the 2NN can still perform a checkpoint.
@@ -2350,7 +2369,7 @@ public class TestCheckpoint {
       // therefore needs to download a new fsimage the next time it performs a
       // checkpoint.
       cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_ENTER, false);
-      cluster.getNameNodeRpc().saveNamespace();
+      cluster.getNameNodeRpc().saveNamespace(0, 0);
       cluster.getNameNodeRpc().setSafeMode(SafeModeAction.SAFEMODE_LEAVE, false);
       
       // Ensure that the 2NN can still perform a checkpoint.

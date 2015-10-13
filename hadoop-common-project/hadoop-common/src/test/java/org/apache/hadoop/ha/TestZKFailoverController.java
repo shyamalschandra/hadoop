@@ -211,8 +211,8 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
       LOG.info("Faking svc0 unhealthy, should failover to svc1");
       cluster.setHealthy(0, false);
       
-      LOG.info("Waiting for svc0 to enter standby state");
-      cluster.waitForHAState(0, HAServiceState.STANDBY);
+      LOG.info("Waiting for svc0 to enter initializing state");
+      cluster.waitForHAState(0, HAServiceState.INITIALIZING);
       cluster.waitForHAState(1, HAServiceState.ACTIVE);
   
       LOG.info("Allowing svc0 to be healthy again, making svc1 unreachable " +
@@ -332,7 +332,7 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
       Mockito.verify(svc1.proxy, Mockito.timeout(2000).atLeastOnce())
         .transitionToActive(Mockito.<StateChangeRequestInfo>any());
 
-      cluster.waitForHAState(0, HAServiceState.STANDBY);
+      cluster.waitForHAState(0, HAServiceState.INITIALIZING);
       cluster.waitForHAState(1, HAServiceState.STANDBY);
       
       LOG.info("Faking svc0 healthy again, should go back to svc0");
@@ -587,12 +587,12 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
 
       // Failover by bad health
       cluster.setHealthy(0, false);
-      cluster.waitForHAState(0, HAServiceState.STANDBY);
+      cluster.waitForHAState(0, HAServiceState.INITIALIZING);
       cluster.waitForHAState(1, HAServiceState.ACTIVE);
       cluster.setHealthy(1, true);
       cluster.setHealthy(0, false);
       cluster.waitForHAState(1, HAServiceState.ACTIVE);
-      cluster.waitForHAState(0, HAServiceState.STANDBY);
+      cluster.waitForHAState(0, HAServiceState.INITIALIZING);
       cluster.setHealthy(0, true);
       
       cluster.waitForHealthState(0, State.SERVICE_HEALTHY);
@@ -600,6 +600,38 @@ public class TestZKFailoverController extends ClientBaseWithFixes {
       // Graceful failovers
       cluster.getZkfc(1).gracefulFailoverToYou();
       cluster.getZkfc(0).gracefulFailoverToYou();
+    } finally {
+      cluster.stop();
+    }
+  }
+
+  @Test(timeout = 25000)
+  public void testGracefulFailoverMultipleZKfcs() throws Exception {
+    try {
+      cluster.start(3);
+
+      cluster.waitForActiveLockHolder(0);
+
+      // failover to first
+      cluster.getService(1).getZKFCProxy(conf, 5000).gracefulFailover();
+      cluster.waitForActiveLockHolder(1);
+
+      // failover to second
+      cluster.getService(2).getZKFCProxy(conf, 5000).gracefulFailover();
+      cluster.waitForActiveLockHolder(2);
+
+      // failover back to original
+      cluster.getService(0).getZKFCProxy(conf, 5000).gracefulFailover();
+      cluster.waitForActiveLockHolder(0);
+
+      Thread.sleep(10000); // allow to quiesce
+
+      assertEquals(0, cluster.getService(0).fenceCount);
+      assertEquals(0, cluster.getService(1).fenceCount);
+      assertEquals(0, cluster.getService(2).fenceCount);
+      assertEquals(2, cluster.getService(0).activeTransitionCount);
+      assertEquals(1, cluster.getService(1).activeTransitionCount);
+      assertEquals(1, cluster.getService(2).activeTransitionCount);
     } finally {
       cluster.stop();
     }

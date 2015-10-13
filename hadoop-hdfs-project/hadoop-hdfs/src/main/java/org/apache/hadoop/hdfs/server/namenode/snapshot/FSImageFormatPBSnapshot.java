@@ -34,8 +34,18 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.permission.PermissionStatus;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.protocol.Block;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.BlockProto;
+import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.server.namenode.AclEntryStatusFormat;
 import org.apache.hadoop.hdfs.server.namenode.AclFeature;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormatPBINode;
@@ -61,12 +71,14 @@ import org.apache.hadoop.hdfs.server.namenode.INodeReference.DstReference;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.WithCount;
 import org.apache.hadoop.hdfs.server.namenode.INodeReference.WithName;
 import org.apache.hadoop.hdfs.server.namenode.INodeWithAdditionalFields;
+import org.apache.hadoop.hdfs.server.namenode.QuotaByStorageTypeEntry;
 import org.apache.hadoop.hdfs.server.namenode.SaveNamespaceContext;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature.DirectoryDiff;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature.DirectoryDiffList;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot.Root;
 import org.apache.hadoop.hdfs.server.namenode.XAttrFeature;
 import org.apache.hadoop.hdfs.util.Diff.ListType;
+import org.apache.hadoop.hdfs.util.EnumCounters;
 
 import com.google.common.base.Preconditions;
 import com.google.protobuf.ByteString;
@@ -197,6 +209,7 @@ public class FSImageFormatPBSnapshot {
         throws IOException {
       final FileDiffList diffs = new FileDiffList();
       final LoaderContext state = parent.getLoaderContext();
+      final BlockManager bm = fsn.getBlockManager();
       for (int i = 0; i < size; i++) {
         SnapshotDiffSection.FileDiff pbf = SnapshotDiffSection.FileDiff
             .parseDelimitedFrom(in);
@@ -208,8 +221,10 @@ public class FSImageFormatPBSnapshot {
 
           AclFeature acl = null;
           if (fileInPb.hasAcl()) {
-            acl = new AclFeature(FSImageFormatPBINode.Loader.loadAclEntries(
-                fileInPb.getAcl(), state.getStringTable()));
+            int[] entries = AclEntryStatusFormat
+                .toInt(FSImageFormatPBINode.Loader.loadAclEntries(
+                    fileInPb.getAcl(), state.getStringTable()));
+            acl = new AclFeature(entries);
           }
           XAttrFeature xAttrs = null;
           if (fileInPb.hasXAttrs()) {
@@ -221,14 +236,37 @@ public class FSImageFormatPBSnapshot {
               .toByteArray(), permission, acl, fileInPb.getModificationTime(),
               fileInPb.getAccessTime(), (short) fileInPb.getReplication(),
               fileInPb.getPreferredBlockSize(),
-              (byte)fileInPb.getStoragePolicyID(), xAttrs);
+              (byte)fileInPb.getStoragePolicyID(), xAttrs,
+              fileInPb.getIsStriped());
         }
 
         FileDiff diff = new FileDiff(pbf.getSnapshotId(), copy, null,
             pbf.getFileSize());
+        List<BlockProto> bpl = pbf.getBlocksList();
+        // in file diff there can only be contiguous blocks
+        BlockInfo[] blocks = new BlockInfo[bpl.size()];
+        for(int j = 0, e = bpl.size(); j < e; ++j) {
+          Block blk = PBHelperClient.convert(bpl.get(j));
+          BlockInfo storedBlock = bm.getStoredBlock(blk);
+          if(storedBlock == null) {
+            storedBlock = (BlockInfoContiguous) fsn.getBlockManager()
+                .addBlockCollectionWithCheck(new BlockInfoContiguous(blk,
+                    copy.getFileReplication()), file);
+          }
+          blocks[j] = storedBlock;
+        }
+        if(blocks.length > 0) {
+          diff.setBlocks(blocks);
+        }
         diffs.addFirst(diff);
       }
       file.addSnapshotFeature(diffs);
+      short repl = file.getPreferredBlockReplication();
+      for (BlockInfo b : file.getBlocks()) {
+        if (b.getReplication() < repl) {
+          bm.setReplication(b.getReplication(), repl, b);
+        }
+      }
     }
 
     /** Load the created list in a DirectoryDiff */
@@ -309,8 +347,10 @@ public class FSImageFormatPBSnapshot {
               dirCopyInPb.getPermission(), state.getStringTable());
           AclFeature acl = null;
           if (dirCopyInPb.hasAcl()) {
-            acl = new AclFeature(FSImageFormatPBINode.Loader.loadAclEntries(
-                dirCopyInPb.getAcl(), state.getStringTable()));
+            int[] entries = AclEntryStatusFormat
+                .toInt(FSImageFormatPBINode.Loader.loadAclEntries(
+                    dirCopyInPb.getAcl(), state.getStringTable()));
+            acl = new AclFeature(entries);
           }
           XAttrFeature xAttrs = null;
           if (dirCopyInPb.hasXAttrs()) {
@@ -320,13 +360,31 @@ public class FSImageFormatPBSnapshot {
 
           long modTime = dirCopyInPb.getModificationTime();
           boolean noQuota = dirCopyInPb.getNsQuota() == -1
-              && dirCopyInPb.getDsQuota() == -1;
+              && dirCopyInPb.getDsQuota() == -1
+              && (!dirCopyInPb.hasTypeQuotas());
 
-          copy = noQuota ? new INodeDirectoryAttributes.SnapshotCopy(name,
-              permission, acl, modTime, xAttrs)
-              : new INodeDirectoryAttributes.CopyWithQuota(name, permission,
-                  acl, modTime, dirCopyInPb.getNsQuota(),
-                  dirCopyInPb.getDsQuota(), xAttrs);
+          if (noQuota) {
+            copy = new INodeDirectoryAttributes.SnapshotCopy(name,
+              permission, acl, modTime, xAttrs);
+          } else {
+            EnumCounters<StorageType> typeQuotas = null;
+            if (dirCopyInPb.hasTypeQuotas()) {
+              ImmutableList<QuotaByStorageTypeEntry> qes =
+                  FSImageFormatPBINode.Loader.loadQuotaByStorageTypeEntries(
+                      dirCopyInPb.getTypeQuotas());
+              typeQuotas = new EnumCounters<StorageType>(StorageType.class,
+                  HdfsConstants.QUOTA_RESET);
+              for (QuotaByStorageTypeEntry qe : qes) {
+                if (qe.getQuota() >= 0 && qe.getStorageType() != null &&
+                    qe.getStorageType().supportTypeQuota()) {
+                  typeQuotas.set(qe.getStorageType(), qe.getQuota());
+                }
+              }
+            }
+            copy = new INodeDirectoryAttributes.CopyWithQuota(name, permission,
+                acl, modTime, dirCopyInPb.getNsQuota(),
+                dirCopyInPb.getDsQuota(), typeQuotas, xAttrs);
+          }
         }
         // load created list
         List<INode> clist = loadCreatedList(in, dir,
@@ -467,6 +525,11 @@ public class FSImageFormatPBSnapshot {
           SnapshotDiffSection.FileDiff.Builder fb = SnapshotDiffSection.FileDiff
               .newBuilder().setSnapshotId(diff.getSnapshotId())
               .setFileSize(diff.getFileSize());
+          if(diff.getBlocks() != null) {
+            for(Block block : diff.getBlocks()) {
+              fb.addBlocks(PBHelperClient.convert(block));
+            }
+          }
           INodeFileAttributes copy = diff.snapshotINode;
           if (copy != null) {
             fb.setName(ByteString.copyFrom(copy.getLocalNameBytes()))

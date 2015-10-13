@@ -51,7 +51,15 @@ if "%1" == "--loglevel" (
       goto print_usage
   )
 
-  set hdfscommands=dfs namenode secondarynamenode journalnode zkfc datanode dfsadmin haadmin fsck balancer jmxget oiv oev fetchdt getconf groups snapshotDiff lsSnapshottableDir cacheadmin mover storagepolicies
+  if %hdfs-command% == classpath (
+    if not defined hdfs-command-arguments (
+      @rem No need to bother starting up a JVM for this simple case.
+      @echo %CLASSPATH%
+      exit /b
+    )
+  )
+
+  set hdfscommands=dfs namenode secondarynamenode journalnode zkfc datanode dfsadmin haadmin fsck balancer jmxget oiv oev fetchdt getconf groups snapshotDiff lsSnapshottableDir cacheadmin mover storagepolicies classpath crypto debug
   for %%i in ( %hdfscommands% ) do (
     if %hdfs-command% == %%i set hdfscommand=true
   )
@@ -122,6 +130,10 @@ goto :eof
   set CLASS=org.apache.hadoop.hdfs.tools.JMXGet
   goto :eof
 
+:classpath
+  set CLASS=org.apache.hadoop.util.Classpath
+  goto :eof
+
 :oiv
   set CLASS=org.apache.hadoop.hdfs.tools.offlineImageViewer.OfflineImageViewerPB
   goto :eof
@@ -160,8 +172,17 @@ goto :eof
   goto :eof
 
 :storagepolicies
-  set CLASS=org.apache.hadoop.hdfs.tools.GetStoragePolicies
+  set CLASS=org.apache.hadoop.hdfs.tools.StoragePolicyAdmin
   goto :eof
+
+:crypto
+  set CLASS=org.apache.hadoop.hdfs.tools.CryptoAdmin
+  goto :eof
+
+:debug
+  set CLASS=org.apache.hadoop.hdfs.tools.DebugAdmin
+  goto :eof
+
 
 @rem This changes %1, %2 etc. Hence those cannot be used after calling this.
 :make_command_arguments
@@ -215,9 +236,11 @@ goto :eof
   @echo   lsSnapshottableDir   list all snapshottable dirs owned by the current user
   @echo 						Use -help to see options
   @echo   cacheadmin           configure the HDFS cache
+  @echo   crypto               configure HDFS encryption zones
   @echo   mover                run a utility to move block replicas across storage types
-  @echo   storagepolicies      get all the existing block storage policies
+  @echo   storagepolicies      list/get/set block storage policies
   @echo.
   @echo Most commands print help when invoked w/o parameters.
 
+@rem There are also debug commands, but they don't show up in this listing.
 endlocal

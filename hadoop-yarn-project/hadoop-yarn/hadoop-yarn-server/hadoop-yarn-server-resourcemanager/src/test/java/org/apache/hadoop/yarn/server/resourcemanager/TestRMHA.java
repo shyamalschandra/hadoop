@@ -43,14 +43,18 @@ import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.yarn.conf.HAUtil;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.DrainDispatcher;
+import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
+import org.apache.hadoop.yarn.server.resourcemanager.recovery.records.ApplicationStateData;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.MemoryRMStateStore;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.StoreFencedException;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.RMAppAttemptState;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Assert;
@@ -459,7 +463,8 @@ public class TestRMHA {
 
     MemoryRMStateStore memStore = new MemoryRMStateStore() {
       @Override
-      public synchronized void updateApplicationState(ApplicationState appState) {
+      public synchronized void updateApplicationState(
+          ApplicationStateData appState) {
         notifyStoreOperationFailed(new StoreFencedException());
       }
     };
@@ -573,6 +578,56 @@ public class TestRMHA {
     verifyClusterMetrics(0, 0, 0, 0, 0, 0);
     assertEquals(0, rm.getRMContext().getRMNodes().size());
     assertEquals(0, rm.getRMContext().getRMApps().size());
+  }
+
+  @Test(timeout = 90000)
+  public void testTransitionedToActiveRefreshFail() throws Exception {
+    configuration.setBoolean(YarnConfiguration.AUTO_FAILOVER_ENABLED, false);
+    YarnConfiguration conf = new YarnConfiguration(configuration);
+    configuration = new CapacitySchedulerConfiguration(conf);
+    rm = new MockRM(configuration) {
+      @Override
+      protected AdminService createAdminService() {
+        return new AdminService(this, getRMContext()) {
+          @Override
+          protected void setConfig(Configuration conf) {
+            super.setConfig(configuration);
+          }
+        };
+      }
+
+      @Override
+      protected Dispatcher createDispatcher() {
+        return new FailFastDispatcher();
+      }
+    };
+
+    rm.init(configuration);
+    rm.start();
+    final StateChangeRequestInfo requestInfo =
+        new StateChangeRequestInfo(
+            HAServiceProtocol.RequestSource.REQUEST_BY_USER);
+
+    configuration.set("yarn.scheduler.capacity.root.default.capacity", "100");
+    rm.adminService.transitionToStandby(requestInfo);
+    assertEquals(HAServiceState.STANDBY, rm.getRMContext().getHAServiceState());
+    configuration.set("yarn.scheduler.capacity.root.default.capacity", "200");
+    try {
+      rm.adminService.transitionToActive(requestInfo);
+    } catch (Exception e) {
+      assertTrue("Error on refreshAll during transistion to Active".contains(e
+          .getMessage()));
+    }
+    FailFastDispatcher dispatcher =
+        ((FailFastDispatcher) rm.rmContext.getDispatcher());
+    dispatcher.await();
+    assertEquals(1, dispatcher.getEventCount());
+    // Making correct conf and check the state
+    configuration.set("yarn.scheduler.capacity.root.default.capacity", "100");
+    rm.adminService.transitionToActive(requestInfo);
+    assertEquals(HAServiceState.ACTIVE, rm.getRMContext().getHAServiceState());
+    rm.adminService.transitionToStandby(requestInfo);
+    assertEquals(HAServiceState.STANDBY, rm.getRMContext().getHAServiceState());
   }
 
   public void innerTestHAWithRMHostName(boolean includeBindHost) {
@@ -709,6 +764,24 @@ public class TestRMHA {
 
     public boolean isStopped() {
       return this.stopped;
+    }
+  }
+
+  class FailFastDispatcher extends DrainDispatcher {
+    int eventreceived = 0;
+
+    @SuppressWarnings("rawtypes")
+    @Override
+    protected void dispatch(Event event) {
+      if (event.getType() == RMFatalEventType.TRANSITION_TO_ACTIVE_FAILED) {
+        eventreceived++;
+      } else {
+        super.dispatch(event);
+      }
+    }
+
+    public int getEventCount() {
+      return eventreceived;
     }
   }
 }

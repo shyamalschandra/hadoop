@@ -36,11 +36,10 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.http.HttpConfig.Policy;
-import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.security.AdminACLsManager;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,13 +52,13 @@ import com.google.inject.servlet.GuiceFilter;
 /**
  * Helpers to create an embedded webapp.
  *
- * <h4>Quick start:</h4>
+ * <b>Quick start:</b>
  * <pre>
  *   WebApp wa = WebApps.$for(myApp).start();</pre>
  * Starts a webapp with default routes binds to 0.0.0.0 (all network interfaces)
  * on an ephemeral port, which can be obtained with:<pre>
  *   int port = wa.port();</pre>
- * <h4>With more options:</h4>
+ * <b>With more options:</b>
  * <pre>
  *   WebApp wa = WebApps.$for(myApp).at(address, port).
  *                        with(configuration).
@@ -240,7 +239,9 @@ public class WebApps {
             .addEndpoint(
                 URI.create(httpScheme + bindAddress
                     + ":" + port)).setConf(conf).setFindPort(findPort)
-            .setACL(new AdminACLsManager(conf).getAdminAcl())
+            .setACL(new AccessControlList(conf.get(
+              YarnConfiguration.YARN_ADMIN_ACL, 
+              YarnConfiguration.DEFAULT_YARN_ADMIN_ACL)))
             .setPathSpec(pathList.toArray(new String[0]));
 
         boolean hasSpnegoConf = spnegoPrincipalKey != null

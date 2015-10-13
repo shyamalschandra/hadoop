@@ -20,6 +20,8 @@ package org.apache.hadoop.hdfs.server.datanode;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 
+import java.util.Map;
+
 /**
  * 
  * This is the JMX management interface for data node information
@@ -34,7 +36,14 @@ public interface DataNodeMXBean {
    * @return the version of Hadoop
    */
   public String getVersion();
-  
+
+  /**
+   * Get the version of software running on the DataNode
+   *
+   * @return a string representing the version
+   */
+  public String getSoftwareVersion();
+
   /**
    * Gets the rpc port.
    * 
@@ -76,4 +85,9 @@ public interface DataNodeMXBean {
    * actively transferring blocks.
    */
   public int getXceiverCount();
+
+  /**
+   * Gets the network error counts on a per-Datanode basis.
+   */
+  public Map<String, Map<String, Long>> getDatanodeNetworkCounts();
 }

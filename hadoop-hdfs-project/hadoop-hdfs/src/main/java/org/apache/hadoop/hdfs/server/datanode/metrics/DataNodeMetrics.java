@@ -22,7 +22,6 @@ import static org.apache.hadoop.metrics2.impl.MsInfo.SessionId;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.annotation.Metrics;
@@ -32,6 +31,8 @@ import org.apache.hadoop.metrics2.lib.MutableCounterLong;
 import org.apache.hadoop.metrics2.lib.MutableQuantiles;
 import org.apache.hadoop.metrics2.lib.MutableRate;
 import org.apache.hadoop.metrics2.source.JvmMetrics;
+
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  *
@@ -50,7 +51,11 @@ import org.apache.hadoop.metrics2.source.JvmMetrics;
 public class DataNodeMetrics {
 
   @Metric MutableCounterLong bytesWritten;
+  @Metric("Milliseconds spent writing")
+  MutableCounterLong totalWriteTime;
   @Metric MutableCounterLong bytesRead;
+  @Metric("Milliseconds spent reading")
+  MutableCounterLong totalReadTime;
   @Metric MutableCounterLong blocksWritten;
   @Metric MutableCounterLong blocksRead;
   @Metric MutableCounterLong blocksReplicated;
@@ -64,6 +69,10 @@ public class DataNodeMetrics {
   @Metric MutableCounterLong writesFromLocalClient;
   @Metric MutableCounterLong writesFromRemoteClient;
   @Metric MutableCounterLong blocksGetLocalPathInfo;
+  @Metric("Bytes read by remote client")
+  MutableCounterLong remoteBytesRead;
+  @Metric("Bytes written by remote client")
+  MutableCounterLong remoteBytesWritten;
 
   // RamDisk metrics on read/write
   @Metric MutableCounterLong ramDiskBlocksWrite;
@@ -99,6 +108,7 @@ public class DataNodeMetrics {
   @Metric MutableRate replaceBlockOp;
   @Metric MutableRate heartbeats;
   @Metric MutableRate blockReports;
+  @Metric MutableRate incrementalBlockReports;
   @Metric MutableRate cacheReports;
   @Metric MutableRate packetAckRoundTripTimeNanos;
   final MutableQuantiles[] packetAckRoundTripTimeNanosQuantiles;
@@ -168,7 +178,7 @@ public class DataNodeMetrics {
     MetricsSystem ms = DefaultMetricsSystem.instance();
     JvmMetrics jm = JvmMetrics.create("DataNode", sessionId, ms);
     String name = "DataNodeActivity-"+ (dnName.isEmpty()
-        ? "UndefinedDataNodeName"+ DFSUtil.getRandom().nextInt() 
+        ? "UndefinedDataNodeName"+ ThreadLocalRandom.current().nextInt()
             : dnName.replace(':', '-'));
 
     // Percentile measurement is off by default, by watching no intervals
@@ -193,12 +203,16 @@ public class DataNodeMetrics {
     blockReports.add(latency);
   }
 
+  public void addIncrementalBlockReport(long latency) {
+    incrementalBlockReports.add(latency);
+  }
+
   public void addCacheReport(long latency) {
     cacheReports.add(latency);
   }
 
-  public void incrBlocksReplicated(int delta) {
-    blocksReplicated.incr(delta);
+  public void incrBlocksReplicated() {
+    blocksReplicated.incr();
   }
 
   public void incrBlocksWritten() {
@@ -262,6 +276,15 @@ public class DataNodeMetrics {
     fsyncCount.incr();
   }
 
+  public void incrTotalWriteTime(long timeTaken) {
+    totalWriteTime.incr(timeTaken);
+  }
+
+  public void incrTotalReadTime(long timeTaken) {
+    totalReadTime.incr(timeTaken);
+  }
+
+
   public void addPacketAckRoundTripTimeNanos(long latencyNanos) {
     packetAckRoundTripTimeNanos.add(latencyNanos);
     for (MutableQuantiles q : packetAckRoundTripTimeNanosQuantiles) {
@@ -287,12 +310,23 @@ public class DataNodeMetrics {
     DefaultMetricsSystem.shutdown();
   }
 
-  public void incrWritesFromClient(boolean local) {
-    (local ? writesFromLocalClient : writesFromRemoteClient).incr();
+  public void incrWritesFromClient(boolean local, long size) {
+    if(local) {
+      writesFromLocalClient.incr();
+    } else {
+      writesFromRemoteClient.incr();
+      remoteBytesWritten.incr(size);
+    }
   }
 
-  public void incrReadsFromClient(boolean local) {
-    (local ? readsFromLocalClient : readsFromRemoteClient).incr();
+  public void incrReadsFromClient(boolean local, long size) {
+
+    if (local) {
+      readsFromLocalClient.incr();
+    } else {
+      readsFromRemoteClient.incr();
+      remoteBytesRead.incr(size);
+    }
   }
   
   public void incrVolumeFailures() {

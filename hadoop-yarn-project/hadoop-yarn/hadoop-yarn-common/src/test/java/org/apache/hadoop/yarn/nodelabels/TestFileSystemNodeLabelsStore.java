@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.Map;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.InlineDispatcher;
 import org.junit.After;
@@ -63,6 +64,7 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
   public void before() throws IOException {
     mgr = new MockNodeLabelManager();
     conf = new Configuration();
+    conf.setBoolean(YarnConfiguration.NODE_LABELS_ENABLED, true);
     File tempDir = File.createTempFile("nlb", ".tmp");
     tempDir.delete();
     tempDir.mkdirs();
@@ -82,9 +84,9 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
   @SuppressWarnings({ "unchecked", "rawtypes" })
   @Test(timeout = 10000)
   public void testRecoverWithMirror() throws Exception {
-    mgr.addToCluserNodeLabels(toSet("p1", "p2", "p3"));
-    mgr.addToCluserNodeLabels(toSet("p4"));
-    mgr.addToCluserNodeLabels(toSet("p5", "p6"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p1", "p2", "p3"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p4"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p5", "p6"));
     mgr.replaceLabelsOnNode((Map) ImmutableMap.of(toNodeId("n1"), toSet("p1"),
         toNodeId("n2"), toSet("p2")));
     mgr.replaceLabelsOnNode((Map) ImmutableMap.of(toNodeId("n3"), toSet("p3"),
@@ -106,38 +108,85 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
 
     mgr = new MockNodeLabelManager();
     mgr.init(conf);
+    mgr.start();
 
     // check variables
-    Assert.assertEquals(3, mgr.getClusterNodeLabels().size());
-    Assert.assertTrue(mgr.getClusterNodeLabels().containsAll(
+    Assert.assertEquals(3, mgr.getClusterNodeLabelNames().size());
+    Assert.assertTrue(mgr.getClusterNodeLabelNames().containsAll(
         Arrays.asList("p2", "p4", "p6")));
 
     assertMapContains(mgr.getNodeLabels(), ImmutableMap.of(toNodeId("n2"),
         toSet("p2"), toNodeId("n4"), toSet("p4"), toNodeId("n6"), toSet("p6"),
         toNodeId("n7"), toSet("p6")));
+    assertLabelsToNodesEquals(mgr.getLabelsToNodes(),
+            ImmutableMap.of(
+            "p6", toSet(toNodeId("n6"), toNodeId("n7")),
+            "p4", toSet(toNodeId("n4")),
+            "p2", toSet(toNodeId("n2"))));
 
     // stutdown mgr and start a new mgr
     mgr.stop();
     mgr = new MockNodeLabelManager();
     mgr.init(conf);
+    mgr.start();
 
     // check variables
-    Assert.assertEquals(3, mgr.getClusterNodeLabels().size());
-    Assert.assertTrue(mgr.getClusterNodeLabels().containsAll(
+    Assert.assertEquals(3, mgr.getClusterNodeLabelNames().size());
+    Assert.assertTrue(mgr.getClusterNodeLabelNames().containsAll(
         Arrays.asList("p2", "p4", "p6")));
 
     assertMapContains(mgr.getNodeLabels(), ImmutableMap.of(toNodeId("n2"),
         toSet("p2"), toNodeId("n4"), toSet("p4"), toNodeId("n6"), toSet("p6"),
         toNodeId("n7"), toSet("p6")));
+    assertLabelsToNodesEquals(mgr.getLabelsToNodes(),
+            ImmutableMap.of(
+            "p6", toSet(toNodeId("n6"), toNodeId("n7")),
+            "p4", toSet(toNodeId("n4")),
+            "p2", toSet(toNodeId("n2"))));
+    mgr.stop();
+  }
+
+  @SuppressWarnings({ "unchecked", "rawtypes" })
+  @Test(timeout = 10000)
+  public void testRecoverWithDistributedNodeLabels() throws Exception {
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p1", "p2", "p3"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p4"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p5", "p6"));
+    mgr.replaceLabelsOnNode((Map) ImmutableMap.of(toNodeId("n1"), toSet("p1"),
+        toNodeId("n2"), toSet("p2")));
+    mgr.replaceLabelsOnNode((Map) ImmutableMap.of(toNodeId("n3"), toSet("p3"),
+        toNodeId("n4"), toSet("p4"), toNodeId("n5"), toSet("p5"),
+        toNodeId("n6"), toSet("p6"), toNodeId("n7"), toSet("p6")));
+
+    mgr.removeFromClusterNodeLabels(toSet("p1"));
+    mgr.removeFromClusterNodeLabels(Arrays.asList("p3", "p5"));
+    mgr.stop();
+
+    mgr = new MockNodeLabelManager();
+    Configuration cf = new Configuration(conf);
+    cf.set(YarnConfiguration.NODELABEL_CONFIGURATION_TYPE,
+        YarnConfiguration.DISTRIBUTED_NODELABEL_CONFIGURATION_TYPE);
+    mgr.init(cf);
+    mgr.start();
+
+    // check variables
+    Assert.assertEquals(3, mgr.getClusterNodeLabels().size());
+    Assert.assertTrue(mgr.getClusterNodeLabelNames().containsAll(
+        Arrays.asList("p2", "p4", "p6")));
+
+    Assert.assertTrue("During recovery in distributed node-labels setup, "
+        + "node to labels mapping should not be recovered ", mgr
+        .getNodeLabels().size() == 0);
+
     mgr.stop();
   }
 
   @SuppressWarnings({ "unchecked", "rawtypes" })
   @Test(timeout = 10000)
   public void testEditlogRecover() throws Exception {
-    mgr.addToCluserNodeLabels(toSet("p1", "p2", "p3"));
-    mgr.addToCluserNodeLabels(toSet("p4"));
-    mgr.addToCluserNodeLabels(toSet("p5", "p6"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p1", "p2", "p3"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p4"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p5", "p6"));
     mgr.replaceLabelsOnNode(ImmutableMap.of(toNodeId("n1"), toSet("p1"),
         toNodeId("n2"), toSet("p2")));
     mgr.replaceLabelsOnNode((Map) ImmutableMap.of(toNodeId("n3"), toSet("p3"),
@@ -159,24 +208,33 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
 
     mgr = new MockNodeLabelManager();
     mgr.init(conf);
+    mgr.start();
 
     // check variables
-    Assert.assertEquals(3, mgr.getClusterNodeLabels().size());
-    Assert.assertTrue(mgr.getClusterNodeLabels().containsAll(
+    Assert.assertEquals(3, mgr.getClusterNodeLabelNames().size());
+    Assert.assertTrue(mgr.getClusterNodeLabelNames().containsAll(
         Arrays.asList("p2", "p4", "p6")));
 
     assertMapContains(mgr.getNodeLabels(), ImmutableMap.of(toNodeId("n2"),
         toSet("p2"), toNodeId("n4"), toSet("p4"), toNodeId("n6"), toSet("p6"),
         toNodeId("n7"), toSet("p6")));
+    assertLabelsToNodesEquals(mgr.getLabelsToNodes(),
+            ImmutableMap.of(
+            "p6", toSet(toNodeId("n6"), toNodeId("n7")),
+            "p4", toSet(toNodeId("n4")),
+            "p2", toSet(toNodeId("n2"))));
     mgr.stop();
   }
   
   @SuppressWarnings({ "unchecked", "rawtypes" })
-  @Test//(timeout = 10000)
+  @Test (timeout = 10000)
   public void testSerilizationAfterRecovery() throws Exception {
-    mgr.addToCluserNodeLabels(toSet("p1", "p2", "p3"));
-    mgr.addToCluserNodeLabels(toSet("p4"));
-    mgr.addToCluserNodeLabels(toSet("p5", "p6"));
+    // Add to cluster node labels, p2/p6 are non-exclusive.
+    mgr.addToCluserNodeLabels(Arrays.asList(NodeLabel.newInstance("p1", true),
+        NodeLabel.newInstance("p2", false), NodeLabel.newInstance("p3", true),
+        NodeLabel.newInstance("p4", true), NodeLabel.newInstance("p5", true),
+        NodeLabel.newInstance("p6", false)));
+
     mgr.replaceLabelsOnNode(ImmutableMap.of(toNodeId("n1"), toSet("p1"),
         toNodeId("n2"), toSet("p2")));
     mgr.replaceLabelsOnNode((Map) ImmutableMap.of(toNodeId("n3"), toSet("p3"),
@@ -202,6 +260,7 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
      * p4: n4 
      * p6: n6, n7
      */
+
     // shutdown mgr and start a new mgr
     mgr.stop();
 
@@ -210,21 +269,30 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
     mgr.start();
 
     // check variables
-    Assert.assertEquals(3, mgr.getClusterNodeLabels().size());
-    Assert.assertTrue(mgr.getClusterNodeLabels().containsAll(
+    Assert.assertEquals(3, mgr.getClusterNodeLabelNames().size());
+    Assert.assertTrue(mgr.getClusterNodeLabelNames().containsAll(
         Arrays.asList("p2", "p4", "p6")));
 
     assertMapContains(mgr.getNodeLabels(), ImmutableMap.of(toNodeId("n2"),
         toSet("p2"), toNodeId("n4"), toSet("p4"), toNodeId("n6"), toSet("p6"),
         toNodeId("n7"), toSet("p6")));
-    
+    assertLabelsToNodesEquals(mgr.getLabelsToNodes(),
+        ImmutableMap.of(
+        "p6", toSet(toNodeId("n6"), toNodeId("n7")),
+        "p4", toSet(toNodeId("n4")),
+        "p2", toSet(toNodeId("n2"))));
+
+    Assert.assertFalse(mgr.isExclusiveNodeLabel("p2"));
+    Assert.assertTrue(mgr.isExclusiveNodeLabel("p4"));
+    Assert.assertFalse(mgr.isExclusiveNodeLabel("p6"));
+
     /*
      * Add label p7,p8 then shutdown
      */
     mgr = new MockNodeLabelManager();
     mgr.init(conf);
     mgr.start();
-    mgr.addToCluserNodeLabels(toSet("p7", "p8"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p7", "p8"));
     mgr.stop();
     
     /*
@@ -233,7 +301,7 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
     mgr = new MockNodeLabelManager();
     mgr.init(conf);
     mgr.start();
-    mgr.addToCluserNodeLabels(toSet("p9"));
+    mgr.addToCluserNodeLabelsWithDefaultExclusivity(toSet("p9"));
     mgr.stop();
     
     /*
@@ -244,8 +312,8 @@ public class TestFileSystemNodeLabelsStore extends NodeLabelTestBase {
     mgr.start();
 
     // check variables
-    Assert.assertEquals(6, mgr.getClusterNodeLabels().size());
-    Assert.assertTrue(mgr.getClusterNodeLabels().containsAll(
+    Assert.assertEquals(6, mgr.getClusterNodeLabelNames().size());
+    Assert.assertTrue(mgr.getClusterNodeLabelNames().containsAll(
         Arrays.asList("p2", "p4", "p6", "p7", "p8", "p9")));
     mgr.stop();
   }

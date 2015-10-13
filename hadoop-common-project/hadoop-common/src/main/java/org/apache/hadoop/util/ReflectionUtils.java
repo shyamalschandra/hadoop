@@ -20,13 +20,16 @@ package org.apache.hadoop.util;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.io.PrintWriter;
+import java.io.UnsupportedEncodingException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -154,7 +157,7 @@ public class ReflectionUtils {
    * @param stream the stream to
    * @param title a string title for the stack trace
    */
-  public synchronized static void printThreadInfo(PrintWriter stream,
+  public synchronized static void printThreadInfo(PrintStream stream,
                                      String title) {
     final int STACK_DEPTH = 20;
     boolean contention = threadBean.isThreadContentionMonitoringEnabled();
@@ -215,9 +218,12 @@ public class ReflectionUtils {
         }
       }
       if (dumpStack) {
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        printThreadInfo(new PrintWriter(buffer), title);
-        log.info(buffer.toString());
+        try {
+          ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+          printThreadInfo(new PrintStream(buffer, false, "UTF-8"), title);
+          log.info(buffer.toString(Charset.defaultCharset().name()));
+        } catch (UnsupportedEncodingException ignored) {
+        }
       }
     }
   }
@@ -258,7 +264,7 @@ public class ReflectionUtils {
   /**
    * Allocate a buffer for each thread that tries to clone objects.
    */
-  private static ThreadLocal<CopyInCopyOutBuffer> cloneBuffers
+  private static final ThreadLocal<CopyInCopyOutBuffer> CLONE_BUFFERS
       = new ThreadLocal<CopyInCopyOutBuffer>() {
       @Override
       protected synchronized CopyInCopyOutBuffer initialValue() {
@@ -283,7 +289,7 @@ public class ReflectionUtils {
   @SuppressWarnings("unchecked")
   public static <T> T copy(Configuration conf, 
                                 T src, T dst) throws IOException {
-    CopyInCopyOutBuffer buffer = cloneBuffers.get();
+    CopyInCopyOutBuffer buffer = CLONE_BUFFERS.get();
     buffer.outBuffer.reset();
     SerializationFactory factory = getFactory(conf);
     Class<T> cls = (Class<T>) src.getClass();
@@ -300,7 +306,7 @@ public class ReflectionUtils {
   @Deprecated
   public static void cloneWritableInto(Writable dst, 
                                        Writable src) throws IOException {
-    CopyInCopyOutBuffer buffer = cloneBuffers.get();
+    CopyInCopyOutBuffer buffer = CLONE_BUFFERS.get();
     buffer.outBuffer.reset();
     src.write(buffer.outBuffer);
     buffer.moveData();

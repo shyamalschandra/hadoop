@@ -230,10 +230,8 @@ public class InputSampler<K,V> extends Configured implements Tool  {
               // to reflect the possibility of existing elements being
               // pushed out
               int ind = r.nextInt(numSamples);
-              if (ind != numSamples) {
-                samples.set(ind, ReflectionUtils.copy(job.getConfiguration(),
-                                 reader.getCurrentKey(), null));
-              }
+              samples.set(ind, ReflectionUtils.copy(job.getConfiguration(),
+                               reader.getCurrentKey(), null));
               freq *= (numSamples - 1) / (double) numSamples;
             }
           }
@@ -348,7 +346,7 @@ public class InputSampler<K,V> extends Configured implements Tool  {
    * Configures a JobConf instance and calls {@link #writePartitionFile}.
    */
   public int run(String[] args) throws Exception {
-    Job job = new Job(getConf());
+    Job job = Job.getInstance(getConf());
     ArrayList<String> otherArgs = new ArrayList<String>();
     Sampler<K,V> sampler = null;
     for(int i=0; i < args.length; ++i) {

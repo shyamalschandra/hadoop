@@ -58,13 +58,6 @@
 </property>
 
 <property>
-  <name>mapreduce.local.clientfactory.class.name</name>
-  <value>org.apache.hadoop.mapred.LocalClientFactory</value>
-  <description>This the client factory that is responsible for 
-  creating local job runner client</description>
-</property>
-
-<property>
   <name>mapreduce.job.maps</name>
   <value>2</value>
   <description>The default number of map tasks per job.
@@ -83,16 +76,43 @@
 </property>
 
 <property>
-  <name>mapreduce.job.reducer.preempt.delay.sec</name>
+  <name>mapreduce.job.running.map.limit</name>
   <value>0</value>
-  <description>The threshold in terms of seconds after which an unsatisfied mapper 
-  request triggers reducer preemption to free space. Default 0 implies that the 
-  reduces should be preempted immediately after allocation if there is currently no
-  room for newly allocated mappers.
+  <description>The maximum number of simultaneous map tasks per job.
+  There is no limit if this value is 0 or negative.
   </description>
 </property>
 
 <property>
+  <name>mapreduce.job.running.reduce.limit</name>
+  <value>0</value>
+  <description>The maximum number of simultaneous reduce tasks per job.
+  There is no limit if this value is 0 or negative.
+  </description>
+</property>
+
+  <property>
+    <name>mapreduce.job.reducer.preempt.delay.sec</name>
+    <value>0</value>
+    <description>The threshold (in seconds) after which an unsatisfied
+      mapper request triggers reducer preemption when there is no anticipated
+      headroom. If set to 0 or a negative value, the reducer is preempted as
+      soon as lack of headroom is detected. Default is 0.
+    </description>
+  </property>
+
+  <property>
+    <name>mapreduce.job.reducer.unconditional-preempt.delay.sec</name>
+    <value>300</value>
+    <description>The threshold (in seconds) after which an unsatisfied
+      mapper request triggers a forced reducer preemption irrespective of the
+      anticipated headroom. By default, it is set to 5 mins. Setting it to 0
+      leads to immediate reducer preemption. Setting to -1 disables this
+      preemption altogether.
+    </description>
+  </property>
+
+  <property>
     <name>mapreduce.job.max.split.locations</name>
     <value>10</value>
     <description>The max number of block locations to store for each split for 
@@ -208,9 +228,11 @@
 
 <property>
   <name>mapreduce.map.memory.mb</name>
-  <value>1024</value>
+  <value>-1</value>
   <description>The amount of memory to request from the scheduler for each
-  map task.
+    map task. If this is not specified or is non-positive, it is inferred from
+    mapreduce.map.java.opts and mapreduce.job.heap.memory-mb.ratio.
+    If java-opts are also not specified, we set it to 1024.
   </description>
 </property>
 
@@ -224,9 +246,11 @@
 
 <property>
   <name>mapreduce.reduce.memory.mb</name>
-  <value>1024</value>
+  <value>-1</value>
   <description>The amount of memory to request from the scheduler for each
-  reduce task.
+    reduce task. If this is not specified or is non-positive, it is inferred
+    from mapreduce.reduce.java.opts and mapreduce.job.heap.memory-mb.ratio.
+    If java-opts are also not specified, we set it to 1024.
   </description>
 </property>
 
@@ -240,7 +264,7 @@
 
 <property>
   <name>mapred.child.java.opts</name>
-  <value>-Xmx200m</value>
+  <value></value>
   <description>Java opts for the task processes.
   The following symbol, if present, will be interpolated: @taskid@ is replaced 
   by current TaskID. Any other occurrences of '@' will go unchanged.
@@ -251,7 +275,10 @@
   Usage of -Djava.library.path can cause programs to no longer function if
   hadoop native libraries are used. These values should instead be set as part 
   of LD_LIBRARY_PATH in the map / reduce JVM env using the mapreduce.map.env and 
-  mapreduce.reduce.env config settings. 
+  mapreduce.reduce.env config settings.
+
+  If -Xmx is not set, it is inferred from mapreduce.{map|reduce}.memory.mb and
+  mapreduce.job.heap.memory-mb.ratio.
   </description>
 </property>
 
@@ -260,7 +287,9 @@
   <name>mapreduce.map.java.opts</name>
   <value></value>
   <description>Java opts only for the child processes that are maps. If set,
-  this will be used instead of mapred.child.java.opts.
+  this will be used instead of mapred.child.java.opts. If -Xmx is not set,
+  it is inferred from mapreduce.map.memory.mb and
+  mapreduce.job.heap.memory-mb.ratio.
   </description>
 </property>
 -->
@@ -270,7 +299,9 @@
   <name>mapreduce.reduce.java.opts</name>
   <value></value>
   <description>Java opts only for the child processes that are reduces. If set,
-  this will be used instead of mapred.child.java.opts.
+  this will be used instead of mapred.child.java.opts. If -Xmx is not set,
+  it is inferred from mapreduce.reduce.memory.mb and
+  mapreduce.job.heap.memory-mb.ratio.
   </description>
 </property>
 -->
@@ -320,22 +351,12 @@
 </property>
 
 <property>
-  <name>mapreduce.task.tmp.dir</name>
-  <value>./tmp</value>
-  <description> To set the value of tmp directory for map and reduce tasks.
-  If the value is an absolute path, it is directly assigned. Otherwise, it is
-  prepended with task's working directory. The java tasks are executed with
-  option -Djava.io.tmpdir='the absolute path of the tmp dir'. Pipes and
-  streaming are set with environment variable,
-   TMPDIR='the absolute path of the tmp dir'
-  </description>
-</property>
-
-<property>
   <name>mapreduce.map.log.level</name>
   <value>INFO</value>
   <description>The logging level for the map task. The allowed levels are:
   OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE and ALL.
+  The setting here could be overridden if "mapreduce.job.log4j-properties-file"
+  is set.
   </description>
 </property>
 
@@ -344,6 +365,8 @@
   <value>INFO</value>
   <description>The logging level for the reduce task. The allowed levels are:
   OFF, FATAL, ERROR, WARN, INFO, DEBUG, TRACE and ALL.
+  The setting here could be overridden if "mapreduce.job.log4j-properties-file"
+  is set.
   </description>
 </property>
 
@@ -487,11 +510,40 @@
   <description>If true, then multiple instances of some reduce tasks 
                may be executed in parallel.</description>
 </property>
+
 <property>
-  <name>mapreduce.job.speculative.speculativecap</name>
+  <name>mapreduce.job.speculative.speculative-cap-running-tasks</name>
   <value>0.1</value>
   <description>The max percent (0-1) of running tasks that
   can be speculatively re-executed at any time.</description>
+</property>
+
+<property>
+  <name>mapreduce.job.speculative.speculative-cap-total-tasks</name>
+  <value>0.01</value>
+  <description>The max percent (0-1) of all tasks that
+  can be speculatively re-executed at any time.</description>
+</property>
+
+<property>
+  <name>mapreduce.job.speculative.minimum-allowed-tasks</name>
+  <value>10</value>
+  <description>The minimum allowed tasks that
+  can be speculatively re-executed at any time.</description>
+</property>
+
+<property>
+  <name>mapreduce.job.speculative.retry-after-no-speculate</name>
+  <value>1000</value>
+  <description>The waiting time(ms) to do next round of speculation
+  if there is no task speculated in this round.</description>
+</property>
+
+<property>
+  <name>mapreduce.job.speculative.retry-after-speculate</name>
+  <value>15000</value>
+  <description>The waiting time(ms) to do next round of speculation
+  if there are tasks speculated in this round.</description>
 </property>
 
 <property>
@@ -510,16 +562,6 @@
   <description>The number of standard deviations by which a task's
   ave progress-rates must be lower than the average of all running tasks'
   for the task to be considered too slow.
-  </description>
-</property>
-
-<property>
-  <name>mapreduce.job.speculative.slownodethreshold</name>
-  <value>1.0</value>
-  <description>The number of standard deviations by which a Task 
-  Tracker's average map and reduce progress-rates (finishTime-dispatchTime)
-  must be lower than the average of all successful map/reduce task's for
-  the NodeManager to be considered too slow to give a speculative task to.
   </description>
 </property>
 
@@ -708,8 +750,36 @@
     org.apache.log4j.RollingFileAppender.maxBackupIndex. By default,
     ContainerLogAppender (CLA) is used, and container logs are not rolled. CRLA
     is enabled for the ApplicationMaster when both
-    mapreduce.task.userlog.limit.kb and
+    yarn.app.mapreduce.am.container.log.limit.kb and
     yarn.app.mapreduce.am.container.log.backups are greater than zero.
+  </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.shuffle.log.separate</name>
+  <value>true</value>
+  <description>If enabled ('true') logging generated by the client-side shuffle
+    classes in a reducer will be written in a dedicated log file
+    'syslog.shuffle' instead of 'syslog'.
+  </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.shuffle.log.limit.kb</name>
+  <value>0</value>
+  <description>Maximum size of the syslog.shuffle file in kilobytes
+    (0 for no limit).
+  </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.shuffle.log.backups</name>
+  <value>0</value>
+  <description>If yarn.app.mapreduce.shuffle.log.limit.kb and
+    yarn.app.mapreduce.shuffle.log.backups are greater than zero
+    then a ContainerRollngLogAppender is used instead of ContainerLogAppender
+    for syslog.shuffle. See
+    org.apache.log4j.RollingFileAppender.maxBackupIndex
   </description>
 </property>
 
@@ -814,30 +884,6 @@
     next, to the MR ApplicationMaster. So that on failures, the MR AM
     knows which ones are possibly the bad records. On further executions,
     those are skipped.
-    </description>
-  </property>
-  
-  <property>
-    <name>mapreduce.map.skip.proc.count.autoincr</name>
-    <value>true</value>
-    <description> The flag which if set to true, 
-    SkipBadRecords.COUNTER_MAP_PROCESSED_RECORDS is incremented 
-    by MapRunner after invoking the map function. This value must be set to 
-    false for applications which process the records asynchronously 
-    or buffer the input records. For example streaming. 
-    In such cases applications should increment this counter on their own.
-    </description>
-  </property>
-  
-  <property>
-    <name>mapreduce.reduce.skip.proc.count.autoincr</name>
-    <value>true</value>
-    <description> The flag which if set to true, 
-    SkipBadRecords.COUNTER_REDUCE_PROCESSED_GROUPS is incremented 
-    by framework after invoking the reduce function. This value must be set to 
-    false for applications which process the records asynchronously 
-    or buffer the input records. For example streaming. 
-    In such cases applications should increment this counter on their own.
     </description>
   </property>
   
@@ -1078,6 +1124,41 @@
 <!-- MR YARN Application properties -->
 
 <property>
+ <name>mapreduce.job.node-label-expression</name>
+  <description>All the containers of the Map Reduce job will be run with this
+  node label expression. If the node-label-expression for job is not set, then
+  it will use queue's default-node-label-expression for all job's containers.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.job.am.node-label-expression</name>
+  <description>This is node-label configuration for Map Reduce Application Master
+  container. If not configured it will make use of
+  mapreduce.job.node-label-expression and if job's node-label expression is not
+  configured then it will use queue's default-node-label-expression.
+  </description>
+</property>
+
+<property>
+ <name>mapreduce.map.node-label-expression</name>
+  <description>This is node-label configuration for Map task containers. If not
+  configured it will use mapreduce.job.node-label-expression and if job's
+  node-label expression is not configured then it will use queue's
+  default-node-label-expression.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.reduce.node-label-expression</name>
+  <description>This is node-label configuration for Reduce task containers. If
+  not configured it will use mapreduce.job.node-label-expression and if job's
+  node-label expression is not configured then it will use queue's
+  default-node-label-expression.
+  </description>
+</property>
+
+<property>
  <name>mapreduce.job.counters.limit</name>
   <value>120</value>
   <description>Limit on the number of user counters allowed per job.
@@ -1146,6 +1227,17 @@
     marked as final to prevent users from overriding this.
   </description>
 </property>
+
+  <property>
+    <name>mapreduce.job.log4j-properties-file</name>
+    <value></value>
+    <description>Used to override the default settings of log4j in container-log4j.properties
+    for NodeManager. Like container-log4j.properties, it requires certain
+    framework appenders properly defined in this overriden file. The file on the
+    path will be added to distributed cache and classpath. If no-scheme is given
+    in the path, it defaults to point to a log4j file on the local FS.
+    </description>
+  </property>
 
 <property>
   <name>mapreduce.job.end-notification.max.retry.interval</name>
@@ -1241,6 +1333,60 @@
 </property>
 
 <property>
+  <name>mapreduce.fileoutputcommitter.algorithm.version</name>
+  <value>2</value>
+  <description>The file output committer algorithm version
+  valid algorithm version number: 1 or 2
+  default to 2, which is the original algorithm
+
+  In algorithm version 1,
+
+  1. commitTask will rename directory
+  $joboutput/_temporary/$appAttemptID/_temporary/$taskAttemptID/
+  to
+  $joboutput/_temporary/$appAttemptID/$taskID/
+
+  2. recoverTask will also do a rename
+  $joboutput/_temporary/$appAttemptID/$taskID/
+  to
+  $joboutput/_temporary/($appAttemptID + 1)/$taskID/
+
+  3. commitJob will merge every task output file in
+  $joboutput/_temporary/$appAttemptID/$taskID/
+  to
+  $joboutput/, then it will delete $joboutput/_temporary/
+  and write $joboutput/_SUCCESS
+
+  It has a performance regression, which is discussed in MAPREDUCE-4815.
+  If a job generates many files to commit then the commitJob
+  method call at the end of the job can take minutes.
+  the commit is single-threaded and waits until all
+  tasks have completed before commencing.
+
+  algorithm version 2 will change the behavior of commitTask,
+  recoverTask, and commitJob.
+
+  1. commitTask will rename all files in
+  $joboutput/_temporary/$appAttemptID/_temporary/$taskAttemptID/
+  to $joboutput/
+
+  2. recoverTask actually doesn't require to do anything, but for
+  upgrade from version 1 to version 2 case, it will check if there
+  are any files in
+  $joboutput/_temporary/($appAttemptID - 1)/$taskID/
+  and rename them to $joboutput/
+
+  3. commitJob can simply delete $joboutput/_temporary and write
+  $joboutput/_SUCCESS
+
+  This algorithm will reduce the output commit time for
+  large jobs by having the tasks commit directly to the final
+  output directory as they were completing and commitJob had
+  very little to do.
+  </description>
+</property>
+
+<property>
   <name>yarn.app.mapreduce.am.scheduler.heartbeat.interval-ms</name>
   <value>1000</value>
   <description>The interval in ms at which the MR AppMaster should send
@@ -1280,6 +1426,31 @@
   <description>
       The number of virtual CPU cores the MR AppMaster needs.
   </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.am.hard-kill-timeout-ms</name>
+  <value>10000</value>
+  <description>
+     Number of milliseconds to wait before the job client kills the application.
+  </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.client.job.max-retries</name>
+  <value>0</value>
+  <description>The number of retries the client will make for getJob and
+  dependent calls.  The default is 0 as this is generally only needed for
+  non-HDFS DFS where additional, high level retries are required to avoid
+  spurious failures during the getJob call.  30 is a good value for
+  WASB</description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.client.job.retry-interval</name>
+  <value>2000</value>
+  <description>The delay between getJob retries in ms for retries configured
+  with yarn.app.mapreduce.client.job.max-retries.</description>
 </property>
 
 <property>
@@ -1347,10 +1518,23 @@
    <value></value>
   <description>Used to override the default definition of the system classes for
     the job classloader. The system classes are a comma-separated list of
-    classes that should be loaded from the system classpath, not the
-    user-supplied JARs, when mapreduce.job.classloader is enabled. Names ending
-    in '.' (period) are treated as package names, and names starting with a '-'
-    are treated as negative matches.
+    patterns that indicate whether to load a class from the system classpath,
+    instead from the user-supplied JARs, when mapreduce.job.classloader is
+    enabled.
+
+    A positive pattern is defined as:
+        1. A single class name 'C' that matches 'C' and transitively all nested
+            classes 'C$*' defined in C;
+        2. A package name ending with a '.' (e.g., "com.example.") that matches
+            all classes from that package.
+    A negative pattern is defined by a '-' in front of a positive pattern
+    (e.g., "-com.example.").
+
+    A class is considered a system class if and only if it matches one of the
+    positive patterns and none of the negative ones. More formally:
+    A class is a member of the inclusion set I if it matches one of the positive
+    patterns. A class is a member of the exclusion set E if it matches one of
+    the negative patterns. The set of system classes S = I \ E.
   </description>
 </property>
 
@@ -1514,6 +1698,14 @@
 </property>
 
 <property>
+  <name>mapreduce.jobhistory.recovery.store.leveldb.path</name>
+  <value>${hadoop.tmp.dir}/mapred/history/recoverystore</value>
+  <description>The URI where history server state will be stored if
+  HistoryServerLeveldbSystemStateStoreService is configured as the recovery
+  storage class.</description>
+</property>
+
+<property>
   <name>mapreduce.jobhistory.http.policy</name>
   <value>HTTP_ONLY</value>
   <description>
@@ -1523,4 +1715,80 @@
     - HTTPS_ONLY : Service is provided only on https
   </description>
 </property>
+
+<property>
+  <name>mapreduce.jobhistory.jobname.limit</name>
+  <value>50</value>
+  <description>
+     Number of characters allowed for job name in Job History Server web page.
+  </description>
+</property>
+
+<property>
+  <description>
+  File format the AM will use when generating the .jhist file.  Valid
+  values are "json" for text output and "binary" for faster parsing.
+  </description>
+  <name>mapreduce.jobhistory.jhist.format</name>
+  <value>json</value>
+</property>
+
+<property>
+  <name>mapreduce.job.heap.memory-mb.ratio</name>
+  <value>0.8</value>
+  <description>The ratio of heap-size to container-size. If no -Xmx is
+    specified, it is calculated as
+    (mapreduce.{map|reduce}.memory.mb * mapreduce.heap.memory-mb.ratio).
+    If -Xmx is specified but not mapreduce.{map|reduce}.memory.mb, it is
+    calculated as (heapSize / mapreduce.heap.memory-mb.ratio).
+  </description>
+</property>
+
+<property>
+  <name>yarn.app.mapreduce.am.containerlauncher.threadpool-initial-size</name>
+  <value>10</value>
+  <description>The initial size of thread pool to launch containers in the
+    app master.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.task.exit.timeout</name>
+  <value>60000</value>
+  <description>The number of milliseconds before a task will be
+  terminated if it stays in finishing state for too long.
+  After a task attempt completes from TaskUmbilicalProtocol's point of view,
+  it will be transitioned to finishing state. That will give a chance for the
+  task to exit by itself.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.task.exit.timeout.check-interval-ms</name>
+  <value>20000</value>
+  <description>The interval in milliseconds between which the MR framework
+  checks if task attempts stay in finishing state for too long.
+  </description>
+</property>
+
+<property>
+  <name>mapreduce.job.encrypted-intermediate-data</name>
+  <value>false</value>
+  <description>Encrypt intermediate MapReduce spill files or not
+  default is false</description>
+</property>
+
+<property>
+  <name>mapreduce.job.encrypted-intermediate-data-key-size-bits</name>
+  <value>128</value>
+  <description>Mapreduce encrypt data key size default is 128</description>
+</property>
+
+<property>
+  <name>mapreduce.job.encrypted-intermediate-data.buffer.kb</name>
+  <value>128</value>
+  <description>Buffer size for intermediate encrypt data in kb
+  default is 128</description>
+</property>
+
 </configuration>

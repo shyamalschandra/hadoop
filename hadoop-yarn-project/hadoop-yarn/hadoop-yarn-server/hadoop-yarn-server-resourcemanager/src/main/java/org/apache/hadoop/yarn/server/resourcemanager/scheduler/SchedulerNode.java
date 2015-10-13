@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -33,10 +34,14 @@ import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.nodelabels.CommonNodeLabelsManager;
+import org.apache.hadoop.yarn.server.resourcemanager.nodelabels.RMNodeLabelsManager;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
 import org.apache.hadoop.yarn.util.resource.Resources;
+
+import com.google.common.collect.ImmutableSet;
 
 
 /**
@@ -61,8 +66,11 @@ public abstract class SchedulerNode {
 
   private final RMNode rmNode;
   private final String nodeName;
-
-  public SchedulerNode(RMNode node, boolean usePortForNodeName) {
+  
+  private volatile Set<String> labels = null;
+  
+  public SchedulerNode(RMNode node, boolean usePortForNodeName,
+      Set<String> labels) {
     this.rmNode = node;
     this.availableResource = Resources.clone(node.getTotalCapability());
     this.totalResourceCapability = Resources.clone(node.getTotalCapability());
@@ -71,6 +79,11 @@ public abstract class SchedulerNode {
     } else {
       nodeName = rmNode.getHostName();
     }
+    this.labels = ImmutableSet.copyOf(labels);
+  }
+
+  public SchedulerNode(RMNode node, boolean usePortForNodeName) {
+    this(node, usePortForNodeName, CommonNodeLabelsManager.EMPTY_STRING_SET);
   }
 
   public RMNode getRMNode() {
@@ -102,7 +115,7 @@ public abstract class SchedulerNode {
 
   /**
    * Get the name of the node for scheduling matching decisions.
-   * <p/>
+   * <p>
    * Typically this is the 'hostname' reported by the node, but it could be
    * configured to be 'hostname:port' reported by the node via the
    * {@link YarnConfiguration#RM_SCHEDULER_INCLUDE_PORT_IN_NODE_NAME} constant.
@@ -143,6 +156,37 @@ public abstract class SchedulerNode {
         + ", which has " + numContainers + " containers, "
         + getUsedResource() + " used and " + getAvailableResource()
         + " available after allocation");
+  }
+  
+  private synchronized void changeContainerResource(ContainerId containerId,
+      Resource deltaResource, boolean increase) {
+    if (increase) {
+      deductAvailableResource(deltaResource);
+    } else {
+      addAvailableResource(deltaResource);
+    }
+
+    LOG.info((increase ? "Increased" : "Decreased") + " container "
+        + containerId + " of capacity " + deltaResource + " on host "
+        + rmNode.getNodeAddress() + ", which has " + numContainers
+        + " containers, " + getUsedResource() + " used and "
+        + getAvailableResource() + " available after allocation");
+  }
+  
+  /**
+   * The Scheduler increased container
+   */
+  public synchronized void increaseContainer(ContainerId containerId,
+      Resource deltaResource) {
+    changeContainerResource(containerId, deltaResource, true);
+  }
+  
+  /**
+   * The Scheduler decreased container
+   */
+  public synchronized void decreaseContainer(ContainerId containerId,
+      Resource deltaResource) {
+    changeContainerResource(containerId, deltaResource, false);
   }
 
   /**
@@ -242,9 +286,8 @@ public abstract class SchedulerNode {
   @Override
   public String toString() {
     return "host: " + rmNode.getNodeAddress() + " #containers="
-        + getNumContainers() + " available="
-        + getAvailableResource().getMemory() + " used="
-        + getUsedResource().getMemory();
+        + getNumContainers() + " available=" + getAvailableResource()
+        + " used=" + getUsedResource();
   }
 
   /**
@@ -274,5 +317,26 @@ public abstract class SchedulerNode {
       return;
     }
     allocateContainer(rmContainer);
+  }
+  
+  public Set<String> getLabels() {
+    return labels;
+  }
+  
+  public void updateLabels(Set<String> labels) {
+    this.labels = labels;
+  }
+  
+  /**
+   * Get partition of which the node belongs to, if node-labels of this node is
+   * empty or null, it belongs to NO_LABEL partition. And since we only support
+   * one partition for each node (YARN-2694), first label will be its partition.
+   */
+  public String getPartition() {
+    if (this.labels == null || this.labels.isEmpty()) {
+      return RMNodeLabelsManager.NO_LABEL; 
+    } else {
+      return this.labels.iterator().next();
+    }
   }
 }

@@ -21,14 +21,15 @@ package org.apache.hadoop.crypto.key;
 import com.google.common.base.Preconditions;
 import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.security.ProviderUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -144,13 +145,8 @@ public class JavaKeyStoreProvider extends KeyProvider {
           // Provided Password file does not exist
           throw new IOException("Password file does not exists");
         }
-        if (pwdFile != null) {
-          InputStream is = pwdFile.openStream();
-          try {
-            password = IOUtils.toString(is).trim().toCharArray();
-          } finally {
-            is.close();
-          }
+        try (InputStream is = pwdFile.openStream()) {
+          password = IOUtils.toString(is).trim().toCharArray();
         }
       }
     }
@@ -219,9 +215,11 @@ public class JavaKeyStoreProvider extends KeyProvider {
         renameOrFail(path, new Path(path.toString() + "_CORRUPTED_"
             + System.currentTimeMillis()));
         renameOrFail(backupPath, path);
-        LOG.debug(String.format(
-            "KeyStore loaded successfully from '%s' since '%s'"
-                + "was corrupted !!", backupPath, path));
+        if (LOG.isDebugEnabled()) {
+          LOG.debug(String.format(
+              "KeyStore loaded successfully from '%s' since '%s'"
+                  + "was corrupted !!", backupPath, path));
+        }
       } else {
         throw ioe;
       }
@@ -270,8 +268,10 @@ public class JavaKeyStoreProvider extends KeyProvider {
     try {
       perm = loadFromPath(pathToLoad, password);
       renameOrFail(pathToLoad, path);
-      LOG.debug(String.format("KeyStore loaded successfully from '%s'!!",
-          pathToLoad));
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(String.format("KeyStore loaded successfully from '%s'!!",
+            pathToLoad));
+      }
       if (fs.exists(pathToDelete)) {
         fs.delete(pathToDelete, true);
       }
@@ -304,9 +304,11 @@ public class JavaKeyStoreProvider extends KeyProvider {
 
   private FsPermission loadFromPath(Path p, char[] password)
       throws IOException, NoSuchAlgorithmException, CertificateException {
-    FileStatus s = fs.getFileStatus(p);
-    keyStore.load(fs.open(p), password);
-    return s.getPermission();
+    try (FSDataInputStream in = fs.open(p)) {
+      FileStatus s = fs.getFileStatus(p);
+      keyStore.load(in, password);
+      return s.getPermission();
+    }
   }
 
   private Path constructNewPath(Path path) {
@@ -406,6 +408,10 @@ public class JavaKeyStoreProvider extends KeyProvider {
         Metadata meta = ((KeyMetadata) keyStore.getKey(name, password)).metadata;
         cache.put(name, meta);
         return meta;
+      } catch (ClassCastException e) {
+        throw new IOException("Can't cast key for " + name + " in keystore " +
+            path + " to a KeyMetadata. Key may have been added using " +
+            " keytool or some other non-Hadoop method.", e);
       } catch (KeyStoreException e) {
         throw new IOException("Can't get metadata for " + name +
             " from keystore " + path, e);
@@ -424,7 +430,7 @@ public class JavaKeyStoreProvider extends KeyProvider {
   @Override
   public KeyVersion createKey(String name, byte[] material,
                                Options options) throws IOException {
-    Preconditions.checkArgument(name.equals(name.toLowerCase()),
+    Preconditions.checkArgument(name.equals(StringUtils.toLowerCase(name)),
         "Uppercase key names are unsupported: %s", name);
     writeLock.lock();
     try {
@@ -596,9 +602,8 @@ public class JavaKeyStoreProvider extends KeyProvider {
   }
 
   protected void writeToNew(Path newPath) throws IOException {
-    FSDataOutputStream out =
-        FileSystem.create(fs, newPath, permissions);
-    try {
+    try (FSDataOutputStream out =
+        FileSystem.create(fs, newPath, permissions);) {
       keyStore.store(out, password);
     } catch (KeyStoreException e) {
       throw new IOException("Can't store keystore " + this, e);
@@ -609,7 +614,6 @@ public class JavaKeyStoreProvider extends KeyProvider {
       throw new IOException(
           "Certificate exception storing keystore " + this, e);
     }
-    out.close();
   }
 
   protected boolean backupToOld(Path oldPath)

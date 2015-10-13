@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.datanode.metrics;
 import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
+import org.apache.hadoop.metrics2.MetricsSource;
 
 /**
  * 
@@ -37,7 +38,7 @@ import org.apache.hadoop.classification.InterfaceAudience;
  *
  */
 @InterfaceAudience.Private
-public interface FSDatasetMBean {
+public interface FSDatasetMBean extends MetricsSource {
   
   /**
    * Returns the total space (in bytes) used by a block pool
@@ -77,6 +78,25 @@ public interface FSDatasetMBean {
    * @return The number of failed volumes in the datanode.
    */
   public int getNumFailedVolumes();
+
+  /**
+   * Returns each storage location that has failed, sorted.
+   * @return each storage location that has failed, sorted
+   */
+  String[] getFailedStorageLocations();
+
+  /**
+   * Returns the date/time of the last volume failure in milliseconds since
+   * epoch.
+   * @return date/time of last volume failure in milliseconds since epoch
+   */
+  long getLastVolumeFailureDate();
+
+  /**
+   * Returns an estimate of total capacity lost due to volume failures in bytes.
+   * @return estimate of total capacity lost in bytes
+   */
+  long getEstimatedCapacityLostTotal();
 
   /**
    * Returns the amount of cache used by the datanode (in bytes).

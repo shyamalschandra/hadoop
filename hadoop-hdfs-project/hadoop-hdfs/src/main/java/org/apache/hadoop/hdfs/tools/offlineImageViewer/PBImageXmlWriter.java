@@ -21,7 +21,7 @@ import java.io.BufferedInputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.PrintWriter;
+import java.io.PrintStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -29,6 +29,7 @@ import java.util.Comparator;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CacheDirectiveInfoExpirationProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CacheDirectiveInfoProto;
 import org.apache.hadoop.hdfs.protocol.proto.ClientNamenodeProtocolProtos.CachePoolInfoProto;
@@ -41,6 +42,7 @@ import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FileSummary;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FilesUnderConstructionSection.FileUnderConstructionEntry;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeDirectorySection;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.AclFeatureProto;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.INodeDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.INodeSymlink;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeReferenceSection;
@@ -50,9 +52,8 @@ import org.apache.hadoop.hdfs.server.namenode.FsImageProto.SnapshotDiffSection;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.SnapshotSection;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.StringTableSection;
 import org.apache.hadoop.hdfs.util.XMLUtils;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.util.LimitInputStream;
-
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 
 /**
@@ -62,10 +63,10 @@ import com.google.common.collect.Lists;
 @InterfaceAudience.Private
 public final class PBImageXmlWriter {
   private final Configuration conf;
-  private final PrintWriter out;
+  private final PrintStream out;
   private String[] stringTable;
 
-  public PBImageXmlWriter(Configuration conf, PrintWriter out) {
+  public PBImageXmlWriter(Configuration conf, PrintStream out) {
     this.conf = conf;
     this.out = out;
   }
@@ -76,9 +77,7 @@ public final class PBImageXmlWriter {
     }
 
     FileSummary summary = FSImageUtil.loadSummary(file);
-    FileInputStream fin = null;
-    try {
-      fin = new FileInputStream(file.getFD());
+    try (FileInputStream fin = new FileInputStream(file.getFD())) {
       out.print("<?xml version=\"1.0\"?>\n<fsimage>");
 
       ArrayList<FileSummary.Section> sections = Lists.newArrayList(summary
@@ -140,8 +139,6 @@ public final class PBImageXmlWriter {
         }
       }
       out.print("</fsimage>\n");
-    } finally {
-      IOUtils.cleanup(null, fin);
     }
   }
 
@@ -193,7 +190,7 @@ public final class PBImageXmlWriter {
   private void dumpINodeDirectory(INodeDirectory d) {
     o("mtime", d.getModificationTime()).o("permission",
         dumpPermission(d.getPermission()));
-
+    dumpAcls(d.getAcl());
     if (d.hasDsQuota() && d.hasNsQuota()) {
       o("nsquota", d.getNsQuota()).o("dsquota", d.getDsQuota());
     }
@@ -247,7 +244,7 @@ public final class PBImageXmlWriter {
         .o("atime", f.getAccessTime())
         .o("perferredBlockSize", f.getPreferredBlockSize())
         .o("permission", dumpPermission(f.getPermission()));
-
+    dumpAcls(f.getAcl());
     if (f.getBlocksCount() > 0) {
       out.print("<blocks>");
       for (BlockProto b : f.getBlocksList()) {
@@ -265,6 +262,18 @@ public final class PBImageXmlWriter {
       o("clientName", u.getClientName()).o("clientMachine",
           u.getClientMachine());
       out.print("</file-under-construction>\n");
+    }
+  }
+
+  private void dumpAcls(AclFeatureProto aclFeatureProto) {
+    ImmutableList<AclEntry> aclEntryList = FSImageFormatPBINode.Loader
+        .loadAclEntries(aclFeatureProto, stringTable);
+    if (aclEntryList.size() > 0) {
+      out.print("<acls>");
+      for (AclEntry aclEntry : aclEntryList) {
+        o("acl", aclEntry.toString());
+      }
+      out.print("</acls>");
     }
   }
 

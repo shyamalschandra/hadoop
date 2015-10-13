@@ -18,11 +18,10 @@
 
 package org.apache.hadoop.yarn.server.webproxy;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.util.TrackingUriPlugin;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.UnsupportedEncodingException;
 import java.net.URI;
@@ -34,8 +33,9 @@ import static org.apache.hadoop.yarn.util.StringHelper.ujoin;
 
 public class ProxyUriUtils {
   @SuppressWarnings("unused")
-  private static final Log LOG = LogFactory.getLog(ProxyUriUtils.class);
-  
+  private static final Logger LOG = LoggerFactory.getLogger(
+      ProxyUriUtils.class);
+
   /**Name of the servlet to use when registering the proxy servlet. */
   public static final String PROXY_SERVLET_NAME = "proxy";
   /**Base path where the proxy servlet will handle requests.*/
@@ -181,7 +181,7 @@ public class ProxyUriUtils {
   
   /**
    * Returns the scheme if present in the url
-   * eg. "https://issues.apache.org/jira/browse/YARN" > "https"
+   * eg. "https://issues.apache.org/jira/browse/YARN" {@literal ->} "https"
    */
   public static String getSchemeFromUrl(String url) {
     int index = 0;
@@ -194,4 +194,5 @@ public class ProxyUriUtils {
       return "";
     }
   }
+
 }

@@ -22,6 +22,7 @@ import java.io.*;
 import java.util.Set;
 import java.util.HashSet;
 
+import org.apache.commons.io.Charsets;
 import org.apache.commons.logging.LogFactory;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -72,19 +73,21 @@ public class HostsFileReader {
       throws IOException {
     BufferedReader reader = null;
     try {
-      reader = new BufferedReader(new InputStreamReader(fileInputStream));
+      reader = new BufferedReader(
+          new InputStreamReader(fileInputStream, Charsets.UTF_8));
       String line;
       while ((line = reader.readLine()) != null) {
         String[] nodes = line.split("[ \t\n\f\r]+");
         if (nodes != null) {
           for (int i = 0; i < nodes.length; i++) {
-            if (nodes[i].trim().startsWith("#")) {
+            nodes[i] = nodes[i].trim();
+            if (nodes[i].startsWith("#")) {
               // Everything from now on is a comment
               break;
             }
             if (!nodes[i].isEmpty()) {
-              LOG.info("Adding " + nodes[i] + " to the list of " + type +
-                  " hosts from " + filename);
+              LOG.info("Adding a node \"" + nodes[i] + "\" to the list of "
+                  + type + " hosts from " + filename);
               set.add(nodes[i]);
             }
           }

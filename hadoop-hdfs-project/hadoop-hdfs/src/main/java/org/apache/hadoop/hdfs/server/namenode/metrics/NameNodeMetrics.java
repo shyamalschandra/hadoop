@@ -47,6 +47,7 @@ public class NameNodeMetrics {
   @Metric MutableCounterLong filesAppended;
   @Metric MutableCounterLong getBlockLocations;
   @Metric MutableCounterLong filesRenamed;
+  @Metric MutableCounterLong filesTruncated;
   @Metric MutableCounterLong getListingOps;
   @Metric MutableCounterLong deleteFileOps;
   @Metric("Number of files/dirs deleted by delete or rename operations")
@@ -75,6 +76,31 @@ public class NameNodeMetrics {
   MutableCounterLong blockReceivedAndDeletedOps;
   @Metric("Number of blockReports from individual storages")
   MutableCounterLong storageBlockReportOps;
+
+  @Metric("Number of file system operations")
+  public long totalFileOps(){
+    return
+      getBlockLocations.value() +
+      createFileOps.value() +
+      filesAppended.value() +
+      addBlockOps.value() +
+      getAdditionalDatanodeOps.value() +
+      filesRenamed.value() +
+      filesTruncated.value() +
+      deleteFileOps.value() +
+      getListingOps.value() +
+      fileInfoOps.value() +
+      getLinkTargetOps.value() +
+      createSnapshotOps.value() +
+      deleteSnapshotOps.value() +
+      allowSnapshotOps.value() +
+      disallowSnapshotOps.value() +
+      renameSnapshotOps.value() +
+      listSnapshottableDirOps.value() +
+      createSymlinkOps.value() +
+      snapshotDiffReportOps.value();
+  }
+
 
   @Metric("Journal transactions") MutableRate transactions;
   @Metric("Journal syncs") MutableRate syncs;
@@ -171,6 +197,10 @@ public class NameNodeMetrics {
 
   public void incrFilesRenamed() {
     filesRenamed.incr();
+  }
+
+  public void incrFilesTruncated() {
+    filesTruncated.incr();
   }
 
   public void incrFilesDeleted(long delta) {

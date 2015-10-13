@@ -140,13 +140,13 @@ public class ResourceRequestPBImpl extends  ResourceRequest {
     this.capability = capability;
   }
   @Override
-  public int getNumContainers() {
+  public synchronized int getNumContainers() {
     ResourceRequestProtoOrBuilder p = viaProto ? proto : builder;
     return (p.getNumContainers());
   }
 
   @Override
-  public void setNumContainers(int numContainers) {
+  public synchronized void setNumContainers(int numContainers) {
     maybeInitBuilder();
     builder.setNumContainers((numContainers));
   }
@@ -184,7 +184,8 @@ public class ResourceRequestPBImpl extends  ResourceRequest {
     return "{Priority: " + getPriority() + ", Capability: " + getCapability()
         + ", # Containers: " + getNumContainers()
         + ", Location: " + getResourceName()
-        + ", Relax Locality: " + getRelaxLocality() + "}";
+        + ", Relax Locality: " + getRelaxLocality()
+        + ", Node Label Expression: " + getNodeLabelExpression() + "}";
   }
 
   @Override
@@ -193,7 +194,7 @@ public class ResourceRequestPBImpl extends  ResourceRequest {
     if (!p.hasNodeLabelExpression()) {
       return null;
     }
-    return (p.getNodeLabelExpression());
+    return (p.getNodeLabelExpression().trim());
   }
 
   @Override

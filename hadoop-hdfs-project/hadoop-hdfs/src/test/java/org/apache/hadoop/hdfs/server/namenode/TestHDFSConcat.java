@@ -40,9 +40,13 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
+import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -99,7 +103,7 @@ public class TestHDFSConcat {
     HdfsFileStatus fStatus;
     FSDataInputStream stm;
     
-    String trg = new String("/trg");
+    String trg = "/trg";
     Path trgPath = new Path(trg);
     DFSTestUtil.createFile(dfs, trgPath, fileLen, REPL_FACTOR, 1);
     fStatus  = nn.getFileInfo(trg);
@@ -107,18 +111,21 @@ public class TestHDFSConcat {
     long trgBlocks = nn.getBlockLocations(trg, 0, trgLen).locatedBlockCount();
        
     Path [] files = new Path[numFiles];
-    byte [] [] bytes = new byte [numFiles][(int)fileLen];
+    byte[][] bytes = new byte[numFiles + 1][(int) fileLen];
     LocatedBlocks [] lblocks = new LocatedBlocks[numFiles];
     long [] lens = new long [numFiles];
     
-    
-    int i = 0;
+    stm = dfs.open(trgPath);
+    stm.readFully(0, bytes[0]);
+    stm.close();
+    int i;
     for(i=0; i<files.length; i++) {
       files[i] = new Path("/file"+i);
       Path path = files[i];
       System.out.println("Creating file " + path);
-      DFSTestUtil.createFile(dfs, path, fileLen, REPL_FACTOR, 1);
-    
+
+      // make files with different content
+      DFSTestUtil.createFile(dfs, path, fileLen, REPL_FACTOR, i);
       fStatus = nn.getFileInfo(path.toUri().getPath());
       lens[i] = fStatus.getLen();
       assertEquals(trgLen, lens[i]); // file of the same length.
@@ -127,7 +134,7 @@ public class TestHDFSConcat {
       
       //read the file
       stm = dfs.open(path);
-      stm.readFully(0, bytes[i]);
+      stm.readFully(0, bytes[i + 1]);
       //bytes[i][10] = 10;
       stm.close();
     }
@@ -149,6 +156,17 @@ public class TestHDFSConcat {
     // check count update
     ContentSummary cBefore = dfs.getContentSummary(trgPath.getParent());
     
+    // resort file array, make INode id not sorted.
+    for (int j = 0; j < files.length / 2; j++) {
+      Path tempPath = files[j];
+      files[j] = files[files.length - 1 - j];
+      files[files.length - 1 - j] = tempPath;
+
+      byte[] tempBytes = bytes[1 + j];
+      bytes[1 + j] = bytes[files.length - 1 - j + 1];
+      bytes[files.length - 1 - j + 1] = tempBytes;
+    }
+
     // now concatenate
     dfs.concat(trgPath, files);
     
@@ -385,6 +403,91 @@ public class TestHDFSConcat {
     } catch (Exception e) {
       // exspected
     }
- 
+
+    // the source file's preferred block size cannot be greater than the target
+    {
+      final Path src1 = new Path(parentDir, "src1");
+      DFSTestUtil.createFile(dfs, src1, fileLen, REPL_FACTOR, 0L);
+      final Path src2 = new Path(parentDir, "src2");
+      // create a file whose preferred block size is greater than the target
+      DFSTestUtil.createFile(dfs, src2, 1024, fileLen,
+          dfs.getDefaultBlockSize(trg) * 2, REPL_FACTOR, 0L);
+      try {
+        dfs.concat(trg, new Path[] {src1, src2});
+        fail("didn't fail for src with greater preferred block size");
+      } catch (Exception e) {
+        GenericTestUtils.assertExceptionContains("preferred block size", e);
+      }
+    }
+  }
+
+  /**
+   * make sure we update the quota correctly after concat
+   */
+  @Test
+  public void testConcatWithQuotaDecrease() throws IOException {
+    final short srcRepl = 3; // note this is different with REPL_FACTOR
+    final int srcNum = 10;
+    final Path foo = new Path("/foo");
+    final Path[] srcs = new Path[srcNum];
+    final Path target = new Path(foo, "target");
+    DFSTestUtil.createFile(dfs, target, blockSize, REPL_FACTOR, 0L);
+
+    dfs.setQuota(foo, Long.MAX_VALUE - 1, Long.MAX_VALUE - 1);
+
+    for (int i = 0; i < srcNum; i++) {
+      srcs[i] = new Path(foo, "src" + i);
+      DFSTestUtil.createFile(dfs, srcs[i], blockSize * 2, srcRepl, 0L);
+    }
+
+    ContentSummary summary = dfs.getContentSummary(foo);
+    Assert.assertEquals(11, summary.getFileCount());
+    Assert.assertEquals(blockSize * REPL_FACTOR +
+            blockSize * 2 * srcRepl * srcNum, summary.getSpaceConsumed());
+
+    dfs.concat(target, srcs);
+    summary = dfs.getContentSummary(foo);
+    Assert.assertEquals(1, summary.getFileCount());
+    Assert.assertEquals(
+        blockSize * REPL_FACTOR + blockSize * 2 * REPL_FACTOR * srcNum,
+        summary.getSpaceConsumed());
+  }
+
+  @Test
+  public void testConcatWithQuotaIncrease() throws IOException {
+    final short repl = 3;
+    final int srcNum = 10;
+    final Path foo = new Path("/foo");
+    final Path bar = new Path(foo, "bar");
+    final Path[] srcs = new Path[srcNum];
+    final Path target = new Path(bar, "target");
+    DFSTestUtil.createFile(dfs, target, blockSize, repl, 0L);
+
+    final long dsQuota = blockSize * repl + blockSize * srcNum * REPL_FACTOR;
+    dfs.setQuota(foo, Long.MAX_VALUE - 1, dsQuota);
+
+    for (int i = 0; i < srcNum; i++) {
+      srcs[i] = new Path(bar, "src" + i);
+      DFSTestUtil.createFile(dfs, srcs[i], blockSize, REPL_FACTOR, 0L);
+    }
+
+    ContentSummary summary = dfs.getContentSummary(bar);
+    Assert.assertEquals(11, summary.getFileCount());
+    Assert.assertEquals(dsQuota, summary.getSpaceConsumed());
+
+    try {
+      dfs.concat(target, srcs);
+      fail("QuotaExceededException expected");
+    } catch (RemoteException e) {
+      Assert.assertTrue(
+          e.unwrapRemoteException() instanceof QuotaExceededException);
+    }
+
+    dfs.setQuota(foo, Long.MAX_VALUE - 1, Long.MAX_VALUE - 1);
+    dfs.concat(target, srcs);
+    summary = dfs.getContentSummary(bar);
+    Assert.assertEquals(1, summary.getFileCount());
+    Assert.assertEquals(blockSize * repl * (srcNum + 1),
+        summary.getSpaceConsumed());
   }
 }

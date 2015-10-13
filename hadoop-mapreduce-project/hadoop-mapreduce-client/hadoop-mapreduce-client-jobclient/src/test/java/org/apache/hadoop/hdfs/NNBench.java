@@ -182,8 +182,8 @@ public class NNBench {
       "\t-reduces <number of reduces. default is 1. This is not mandatory>\n" +
       "\t-startTime <time to start, given in seconds from the epoch. " +
       "Make sure this is far enough into the future, so all maps " +
-      "(operations) will start at the same time>. " +
-      "default is launch time + 2 mins. This is not mandatory \n" +
+      "(operations) will start at the same time. " +
+      "default is launch time + 2 mins. This is not mandatory>\n" +
       "\t-blockSize <Block size in bytes. default is 1. " + 
       "This is not mandatory>\n" +
       "\t-bytesToWrite <Bytes to write. default is 0. " + 
@@ -194,7 +194,7 @@ public class NNBench {
       "This is not mandatory>\n" +
       "\t-replicationFactorPerFile <Replication factor for the files." +
         " default is 1. This is not mandatory>\n" +
-      "\t-baseDir <base DFS path. default is /becnhmarks/NNBench. " +
+      "\t-baseDir <base DFS path. default is /benchmarks/NNBench. " +
       "This is not mandatory>\n" +
       "\t-readFileAfterOpen <true or false. if true, it reads the file and " +
       "reports the average time to read. This is valid with the open_read " +

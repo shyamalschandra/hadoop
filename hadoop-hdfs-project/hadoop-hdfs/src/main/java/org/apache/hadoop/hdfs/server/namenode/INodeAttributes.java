@@ -28,6 +28,9 @@ import org.apache.hadoop.hdfs.server.namenode.XAttrFeature;
  */
 @InterfaceAudience.Private
 public interface INodeAttributes {
+
+  public boolean isDirectory();
+
   /**
    * @return null if the local name is null;
    *         otherwise, return the local name byte array.
@@ -75,6 +78,9 @@ public interface INodeAttributes {
         XAttrFeature xAttrFeature) {
       this.name = name;
       this.permission = PermissionStatusFormat.toLong(permissions);
+      if (aclFeature != null) {
+        aclFeature = AclStorage.addAclFeature(aclFeature);
+      }
       this.aclFeature = aclFeature;
       this.modificationTime = modificationTime;
       this.accessTime = accessTime;
@@ -84,7 +90,11 @@ public interface INodeAttributes {
     SnapshotCopy(INode inode) {
       this.name = inode.getLocalNameBytes();
       this.permission = inode.getPermissionLong();
-      this.aclFeature = inode.getAclFeature();
+      if (inode.getAclFeature() != null) {
+        aclFeature = AclStorage.addAclFeature(inode.getAclFeature());
+      } else {
+        aclFeature = null;
+      }
       this.modificationTime = inode.getModificationTime();
       this.accessTime = inode.getAccessTime();
       this.xAttrFeature = inode.getXAttrFeature();

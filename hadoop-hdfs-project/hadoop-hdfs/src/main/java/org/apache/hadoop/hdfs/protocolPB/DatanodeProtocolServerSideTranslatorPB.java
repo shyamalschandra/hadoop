@@ -21,6 +21,7 @@ package org.apache.hadoop.hdfs.protocolPB;
 import java.io.IOException;
 import java.util.List;
 
+import org.apache.hadoop.hdfs.protocol.BlockListAsLongs;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeStatus;
@@ -45,8 +46,8 @@ import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageBlock
 import org.apache.hadoop.hdfs.protocol.proto.DatanodeProtocolProtos.StorageReceivedDeletedBlocksProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.DatanodeIDProto;
 import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.LocatedBlockProto;
-import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.VersionRequestProto;
-import org.apache.hadoop.hdfs.protocol.proto.HdfsProtos.VersionResponseProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsServerProtos.VersionRequestProto;
+import org.apache.hadoop.hdfs.protocol.proto.HdfsServerProtos.VersionResponseProto;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeCommand;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeProtocol;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
@@ -56,7 +57,9 @@ import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.hdfs.server.protocol.StorageReceivedDeletedBlocks;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 
+import com.google.common.base.Preconditions;
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
 
@@ -102,12 +105,16 @@ public class DatanodeProtocolServerSideTranslatorPB implements
       HeartbeatRequestProto request) throws ServiceException {
     HeartbeatResponse response;
     try {
-      final StorageReport[] report = PBHelper.convertStorageReports(
+      final StorageReport[] report = PBHelperClient.convertStorageReports(
           request.getReportsList());
+      VolumeFailureSummary volumeFailureSummary =
+          request.hasVolumeFailureSummary() ? PBHelper.convertVolumeFailureSummary(
+              request.getVolumeFailureSummary()) : null;
       response = impl.sendHeartbeat(PBHelper.convert(request.getRegistration()),
           report, request.getCacheCapacity(), request.getCacheUsed(),
           request.getXmitsInProgress(),
-          request.getXceiverCount(), request.getFailedVolumes());
+          request.getXceiverCount(), request.getFailedVolumes(),
+          volumeFailureSummary, request.getRequestFullBlockReportLease());
     } catch (IOException e) {
       throw new ServiceException(e);
     }
@@ -125,9 +132,10 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     RollingUpgradeStatus rollingUpdateStatus = response
         .getRollingUpdateStatus();
     if (rollingUpdateStatus != null) {
-      builder.setRollingUpgradeStatus(PBHelper
+      builder.setRollingUpgradeStatus(PBHelperClient
           .convertRollingUpgradeStatus(rollingUpdateStatus));
     }
+    builder.setFullBlockReportLeaseId(response.getFullBlockReportLeaseId());
     return builder.build();
   }
 
@@ -140,17 +148,23 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     
     int index = 0;
     for (StorageBlockReportProto s : request.getReportsList()) {
-      List<Long> blockIds = s.getBlocksList();
-      long[] blocks = new long[blockIds.size()];
-      for (int i = 0; i < blockIds.size(); i++) {
-        blocks[i] = blockIds.get(i);
+      final BlockListAsLongs blocks;
+      if (s.hasNumberOfBlocks()) { // new style buffer based reports
+        int num = (int)s.getNumberOfBlocks();
+        Preconditions.checkState(s.getBlocksCount() == 0,
+            "cannot send both blocks list and buffers");
+        blocks = BlockListAsLongs.decodeBuffers(num, s.getBlocksBuffersList());
+      } else {
+        blocks = BlockListAsLongs.decodeLongs(s.getBlocksList());
       }
-      report[index++] = new StorageBlockReport(PBHelper.convert(s.getStorage()),
+      report[index++] = new StorageBlockReport(PBHelperClient.convert(s.getStorage()),
           blocks);
     }
     try {
       cmd = impl.blockReport(PBHelper.convert(request.getRegistration()),
-          request.getBlockPoolId(), report);
+          request.getBlockPoolId(), report,
+          request.hasContext() ?
+              PBHelper.convert(request.getContext()) : null);
     } catch (IOException e) {
       throw new ServiceException(e);
     }
@@ -200,7 +214,7 @@ public class DatanodeProtocolServerSideTranslatorPB implements
       }
       if (sBlock.hasStorage()) {
         info[i] = new StorageReceivedDeletedBlocks(
-            PBHelper.convert(sBlock.getStorage()), rdBlocks);
+            PBHelperClient.convert(sBlock.getStorage()), rdBlocks);
       } else {
         info[i] = new StorageReceivedDeletedBlocks(sBlock.getStorageUuid(), rdBlocks);
       }
@@ -245,7 +259,7 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     List<LocatedBlockProto> lbps = request.getBlocksList();
     LocatedBlock [] blocks = new LocatedBlock [lbps.size()];
     for(int i=0; i<lbps.size(); i++) {
-      blocks[i] = PBHelper.convert(lbps.get(i));
+      blocks[i] = PBHelperClient.convertLocatedBlockProto(lbps.get(i));
     }
     try {
       impl.reportBadBlocks(blocks);
@@ -262,12 +276,12 @@ public class DatanodeProtocolServerSideTranslatorPB implements
     List<DatanodeIDProto> dnprotos = request.getNewTaragetsList();
     DatanodeID[] dns = new DatanodeID[dnprotos.size()];
     for (int i = 0; i < dnprotos.size(); i++) {
-      dns[i] = PBHelper.convert(dnprotos.get(i));
+      dns[i] = PBHelperClient.convert(dnprotos.get(i));
     }
     final List<String> sidprotos = request.getNewTargetStoragesList();
     final String[] storageIDs = sidprotos.toArray(new String[sidprotos.size()]);
     try {
-      impl.commitBlockSynchronization(PBHelper.convert(request.getBlock()),
+      impl.commitBlockSynchronization(PBHelperClient.convert(request.getBlock()),
           request.getNewGenStamp(), request.getNewLength(),
           request.getCloseFile(), request.getDeleteBlock(), dns, storageIDs);
     } catch (IOException e) {

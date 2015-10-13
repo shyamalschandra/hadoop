@@ -38,7 +38,9 @@ public class KMSConfiguration {
   public static final String CONFIG_PREFIX = "hadoop.kms.";
 
   public static final String KEY_ACL_PREFIX = "key.acl.";
+  public static final String KEY_ACL_PREFIX_REGEX = "^key\\.acl\\..+";
   public static final String DEFAULT_KEY_ACL_PREFIX = "default.key.acl.";
+  public static final String WHITELIST_KEY_ACL_PREFIX = "whitelist.key.acl.";
 
   // Property to set the backing KeyProvider
   public static final String KEY_PROVIDER_URI = CONFIG_PREFIX +

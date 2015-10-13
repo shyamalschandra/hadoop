@@ -83,7 +83,7 @@ import static org.apache.hadoop.fs.swift.http.SwiftProtocolConstants.*;
  * This implements the client-side of the Swift REST API
  *
  * The core actions put, get and query data in the Swift object store,
- * after authenticationg the client.
+ * after authenticating the client.
  *
  * <b>Logging:</b>
  *
@@ -172,8 +172,6 @@ public final class SwiftRestClient {
    */
   private URI objectLocationURI;
 
-  private final URI filesystemURI;
-
   /**
    * The name of the service provider
    */
@@ -235,13 +233,6 @@ public final class SwiftRestClient {
    */
   private synchronized URI getEndpointURI() {
     return endpointURI;
-  }
-
-  /**
-   * object location endpoint
-   */
-  private synchronized URI getObjectLocationURI() {
-    return objectLocationURI;
   }
 
   /**
@@ -328,13 +319,6 @@ public final class SwiftRestClient {
     @Override
     protected final GetMethod doCreateMethod(String uri) {
       return new GetMethod(uri);
-    }
-  }
-
-  private static abstract class PostMethodProcessor<R> extends HttpMethodProcessor<PostMethod, R> {
-    @Override
-    protected final PostMethod doCreateMethod(String uri) {
-      return new PostMethod(uri);
     }
   }
 
@@ -449,7 +433,6 @@ public final class SwiftRestClient {
   private SwiftRestClient(URI filesystemURI,
                           Configuration conf)
       throws SwiftConfigurationException {
-    this.filesystemURI = filesystemURI;
     Properties props = RestClientBindings.bind(filesystemURI, conf);
     String stringAuthUri = getOption(props, SWIFT_AUTH_PROPERTY);
     username = getOption(props, SWIFT_USERNAME_PROPERTY);
@@ -1061,10 +1044,9 @@ public final class SwiftRestClient {
    * Authenticate to Openstack Keystone
    * As well as returning the access token, the member fields {@link #token},
    * {@link #endpointURI} and {@link #objectLocationURI} are set up for re-use.
-   * <p/>
+   * <p>
    * This method is re-entrant -if more than one thread attempts to authenticate
    * neither will block -but the field values with have those of the last caller.
-   * <p/>
    *
    * @return authenticated access token
    */
@@ -1130,7 +1112,6 @@ public final class SwiftRestClient {
       final List<Catalog> serviceCatalog = access.getServiceCatalog();
       //locate the specific service catalog that defines Swift; variations
       //in the name of this add complexity to the search
-      boolean catalogMatch = false;
       StringBuilder catList = new StringBuilder();
       StringBuilder regionList = new StringBuilder();
 
@@ -1471,7 +1452,7 @@ public final class SwiftRestClient {
         //and the result
         Header availableContentRange = method.getResponseHeader(
           HEADER_CONTENT_RANGE);
-        if (requestContentLen!=null) {
+        if (availableContentRange != null) {
           errorText.append(" available ").append(availableContentRange.getValue());
         }
         fault = new EOFException(errorText.toString());
@@ -1573,8 +1554,9 @@ public final class SwiftRestClient {
    * This is public for unit testing
    *
    * @param path path to object
-   * @param endpointURI damain url e.g. http://domain.com
+   * @param endpointURI domain url e.g. http://domain.com
    * @return valid URI for object
+   * @throws SwiftException
    */
   public static URI pathToURI(SwiftObjectPath path,
                               URI endpointURI) throws SwiftException {
@@ -1653,7 +1635,7 @@ public final class SwiftRestClient {
    * Execute a method in a new HttpClient instance.
    * If the auth failed, authenticate then retry the method.
    *
-   * @param method methot to exec
+   * @param method method to exec
    * @param <M> Method type
    * @return the status code
    * @throws IOException on any failure
@@ -1820,7 +1802,7 @@ public final class SwiftRestClient {
 
   /**
    * Get the blocksize of this filesystem
-   * @return a blocksize >0
+   * @return a blocksize &gt; 0
    */
   public long getBlocksizeKB() {
     return blocksizeKB;

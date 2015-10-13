@@ -27,31 +27,30 @@ import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
- * <p><code>ResourceRequest</code> represents the request made by an
- * application to the <code>ResourceManager</code> to obtain various 
- * <code>Container</code> allocations.</p>
- * 
- * <p>It includes:
- *   <ul>
- *     <li>{@link Priority} of the request.</li>
- *     <li>
- *       The <em>name</em> of the machine or rack on which the allocation is 
- *       desired. A special value of <em>*</em> signifies that 
- *       <em>any</em> host/rack is acceptable to the application.
- *     </li>
- *     <li>{@link Resource} required for each request.</li>
- *     <li>
- *       Number of containers, of above specifications, which are required 
- *       by the application.
- *     </li>
- *     <li>
- *       A boolean <em>relaxLocality</em> flag, defaulting to <code>true</code>,
- *       which tells the <code>ResourceManager</code> if the application wants
- *       locality to be loose (i.e. allows fall-through to rack or <em>any</em>)
- *       or strict (i.e. specify hard constraint on resource allocation).
- *     </li>
- *   </ul>
- * </p>
+ * {@code ResourceRequest} represents the request made
+ * by an application to the {@code ResourceManager}
+ * to obtain various {@code Container} allocations.
+ * <p>
+ * It includes:
+ * <ul>
+ *   <li>{@link Priority} of the request.</li>
+ *   <li>
+ *     The <em>name</em> of the machine or rack on which the allocation is
+ *     desired. A special value of <em>*</em> signifies that
+ *     <em>any</em> host/rack is acceptable to the application.
+ *   </li>
+ *   <li>{@link Resource} required for each request.</li>
+ *   <li>
+ *     Number of containers, of above specifications, which are required
+ *     by the application.
+ *   </li>
+ *   <li>
+ *     A boolean <em>relaxLocality</em> flag, defaulting to {@code true},
+ *     which tells the {@code ResourceManager} if the application wants
+ *     locality to be loose (i.e. allows fall-through to rack or <em>any</em>)
+ *     or strict (i.e. specify hard constraint on resource allocation).
+ *   </li>
+ * </ul>
  * 
  * @see Resource
  * @see ApplicationMasterProtocol#allocate(org.apache.hadoop.yarn.api.protocolrecords.AllocateRequest)
@@ -253,24 +252,27 @@ public abstract class ResourceRequest implements Comparable<ResourceRequest> {
   /**
    * Get node-label-expression for this Resource Request. If this is set, all
    * containers allocated to satisfy this resource-request will be only on those
-   * nodes that satisfy this node-label-expression
+   * nodes that satisfy this node-label-expression.
+   *  
+   * Please note that node label expression now can only take effect when the
+   * resource request has resourceName = ANY
    * 
    * @return node-label-expression
    */
   @Public
   @Evolving
-  public abstract String getNodeLabelExpression(); 
+  public abstract String getNodeLabelExpression();
   
   /**
-   * Set node label expression of this resource request. Now only
-   * support AND(&&), in the future will provide support for OR(||), NOT(!).
+   * Set node label expression of this resource request. Now only support
+   * specifying a single node label. In the future we will support more complex
+   * node label expression specification like {@code AND(&&), OR(||)}, etc.
    * 
-   * Examples: 
-   * - GPU && LARGE_MEM, ask for node has label GPU and LARGE_MEM together
-   * - "" (empty) means ask for node doesn't have label on it, this is default
-   *   behavior
+   * Any please note that node label expression now can only take effect when
+   * the resource request has resourceName = ANY
    * 
-   * @param nodelabelExpression node-label-expression of this ResourceRequest
+   * @param nodelabelExpression
+   *          node-label-expression of this ResourceRequest
    */
   @Public
   @Evolving

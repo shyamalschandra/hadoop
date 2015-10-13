@@ -82,15 +82,12 @@ public class GangliaContext31 extends GangliaContext {
       return;
     }
 
-    LOG.debug("Emitting metric " + name + ", type " + type + ", value " + 
-      value + " from hostname" + hostName);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Emitting metric " + name + ", type " + type + ", value " +
+          value + " from hostname" + hostName);
+    }
 
     String units = getUnits(name);
-    if (units == null) {
-      LOG.warn("Metric name " + name + ", value " + value
-        + " had 'null' units");
-      units = "";
-    }
     int slope = getSlope(name);
     int tmax = getTmax(name);
     int dmax = getDmax(name);

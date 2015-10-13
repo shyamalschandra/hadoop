@@ -118,6 +118,11 @@ public class TestReconfiguration {
       super(conf);
     }
 
+    @Override
+    protected Configuration getNewConf() {
+      return new Configuration();
+    }
+
     @Override 
     public Collection<String> getReconfigurableProperties() {
       return Arrays.asList(PROP1, PROP2, PROP4);
@@ -336,6 +341,11 @@ public class TestReconfiguration {
       super(conf);
     }
 
+    @Override
+    protected Configuration getNewConf() {
+      return new Configuration();
+    }
+
     final CountDownLatch latch = new CountDownLatch(1);
 
     @Override
@@ -389,14 +399,15 @@ public class TestReconfiguration {
         .reconfigurePropertyImpl(eq("name1"), anyString());
     doNothing().when(dummy)
         .reconfigurePropertyImpl(eq("name2"), anyString());
-    doThrow(new ReconfigurationException("NAME3", "NEW3", "OLD3"))
+    doThrow(new ReconfigurationException("NAME3", "NEW3", "OLD3",
+        new IOException("io exception")))
         .when(dummy).reconfigurePropertyImpl(eq("name3"), anyString());
 
     dummy.startReconfigurationTask();
 
     waitAsyncReconfigureTaskFinish(dummy);
     ReconfigurationTaskStatus status = dummy.getReconfigurationTaskStatus();
-    assertEquals(3, status.getStatus().size());
+    assertEquals(2, status.getStatus().size());
     for (Map.Entry<PropertyChange, Optional<String>> result :
         status.getStatus().entrySet()) {
       PropertyChange change = result.getKey();
@@ -406,7 +417,7 @@ public class TestReconfiguration {
         assertThat(result.getValue().get(),
             containsString("Property name2 is not reconfigurable"));
       } else if (change.prop.equals("name3")) {
-        assertThat(result.getValue().get(), containsString("NAME3"));
+        assertThat(result.getValue().get(), containsString("io exception"));
       } else {
         fail("Unknown property: " + change.prop);
       }

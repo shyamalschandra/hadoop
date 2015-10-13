@@ -22,6 +22,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Timer;
@@ -208,21 +210,34 @@ abstract public class Shell {
 
   /** Return a command for determining if process with specified pid is alive. */
   public static String[] getCheckProcessIsAliveCommand(String pid) {
-    return Shell.WINDOWS ?
-      new String[] { Shell.WINUTILS, "task", "isAlive", pid } :
-      new String[] { "kill", "-0", isSetsidAvailable ? "-" + pid : pid };
+    return getSignalKillCommand(0, pid);
   }
 
   /** Return a command to send a signal to a given pid */
   public static String[] getSignalKillCommand(int code, String pid) {
-    return Shell.WINDOWS ? new String[] { Shell.WINUTILS, "task", "kill", pid } :
-      new String[] { "kill", "-" + code, isSetsidAvailable ? "-" + pid : pid };
+    // Code == 0 means check alive
+    if (Shell.WINDOWS) {
+      if (0 == code) {
+        return new String[] { Shell.WINUTILS, "task", "isAlive", pid };
+      } else {
+        return new String[] { Shell.WINUTILS, "task", "kill", pid };
+      }
+    }
+
+    if (isSetsidAvailable) {
+      // Use the shell-builtin as it support "--" in all Hadoop supported OSes
+      return new String[] { "bash", "-c", "kill -" + code + " -- -" + pid };
+    } else {
+      return new String[] { "bash", "-c", "kill -" + code + " " + pid };
+    }
   }
 
+  public static final String ENV_NAME_REGEX = "[A-Za-z_][A-Za-z0-9_]*";
   /** Return a regular expression string that match environment variables */
   public static String getEnvironmentVariableRegex() {
-    return (WINDOWS) ? "%([A-Za-z_][A-Za-z0-9_]*?)%" :
-      "\\$([A-Za-z_][A-Za-z0-9_]*)";
+    return (WINDOWS)
+        ? "%(" + ENV_NAME_REGEX + "?)%"
+        : "\\$(" + ENV_NAME_REGEX + ")";
   }
   
   /**
@@ -377,6 +392,26 @@ abstract public class Shell {
     return winUtilsPath;
   }
 
+  public static final boolean isBashSupported = checkIsBashSupported();
+  private static boolean checkIsBashSupported() {
+    if (Shell.WINDOWS) {
+      return false;
+    }
+
+    ShellCommandExecutor shexec;
+    boolean supported = true;
+    try {
+      String[] args = {"bash", "-c", "echo 1000"};
+      shexec = new ShellCommandExecutor(args);
+      shexec.execute();
+    } catch (IOException ioe) {
+      LOG.warn("Bash is not supported by the OS", ioe);
+      supported = false;
+    }
+
+    return supported;
+  }
+
   public static final boolean isSetsidAvailable = isSetsidSupported();
   private static boolean isSetsidSupported() {
     if (Shell.WINDOWS) {
@@ -391,7 +426,16 @@ abstract public class Shell {
     } catch (IOException ioe) {
       LOG.debug("setsid is not available on this machine. So not using it.");
       setsidSupported = false;
-    } finally { // handle the exit code
+    }  catch (Error err) {
+      if (err.getMessage().contains("posix_spawn is not " +
+          "a supported process launch mechanism")
+          && (Shell.FREEBSD || Shell.MAC)) {
+        // HADOOP-11924: This is a workaround to avoid failure of class init
+        // by JDK issue on TR locale(JDK-8047340).
+        LOG.info("Avoiding JDK-8047340 on BSD-based systems.", err);
+        setsidSupported = false;
+      }
+    }  finally { // handle the exit code
       if (LOG.isDebugEnabled()) {
         LOG.debug("setsid exited with exit code "
                  + (shexec != null ? shexec.getExitCode() : "(null executor)"));
@@ -493,11 +537,11 @@ abstract public class Shell {
       timeOutTimer.schedule(timeoutTimerTask, timeOutInterval);
     }
     final BufferedReader errReader = 
-            new BufferedReader(new InputStreamReader(process
-                                                     .getErrorStream()));
+            new BufferedReader(new InputStreamReader(
+                process.getErrorStream(), Charset.defaultCharset()));
     BufferedReader inReader = 
-            new BufferedReader(new InputStreamReader(process
-                                                     .getInputStream()));
+            new BufferedReader(new InputStreamReader(
+                process.getInputStream(), Charset.defaultCharset()));
     final StringBuffer errMsg = new StringBuffer();
     
     // read error and input streams as this would free up the buffers
@@ -544,7 +588,9 @@ abstract public class Shell {
         throw new ExitCodeException(exitCode, errMsg.toString());
       }
     } catch (InterruptedException ie) {
-      throw new IOException(ie.toString());
+      InterruptedIOException iie = new InterruptedIOException(ie.toString());
+      iie.initCause(ie);
+      throw iie;
     } finally {
       if (timeOutTimer != null) {
         timeOutTimer.cancel();

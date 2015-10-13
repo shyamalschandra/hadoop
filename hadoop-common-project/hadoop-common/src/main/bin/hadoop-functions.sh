@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
 # this work for additional information regarding copyright ownership.
@@ -14,13 +14,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# we need to declare this globally as an array, which can only
+# be done outside of a function
+declare -a HADOOP_SUBCMD_USAGE
+declare -a HADOOP_OPTION_USAGE
+
+## @description  Print a message to stderr
+## @audience     public
+## @stability    stable
+## @replaceable  no
+## @param        string
 function hadoop_error
 {
-  # NOTE: This function is not user replaceable.
-
   echo "$*" 1>&2
 }
 
+## @description  Print a message to stderr if --debug is turned on
+## @audience     public
+## @stability    stable
+## @replaceable  no
+## @param        string
 function hadoop_debug
 {
   if [[ -n "${HADOOP_SHELL_SCRIPT_DEBUG}" ]]; then
@@ -28,13 +41,198 @@ function hadoop_debug
   fi
 }
 
-function hadoop_bootstrap_init
+## @description  Add a subcommand to the usage output
+## @audience     private
+## @stability    evolving
+## @replaceable  no
+## @param        subcommand
+## @param        subcommanddesc
+function hadoop_add_subcommand
 {
-  # NOTE: This function is not user replaceable.
+  local subcmd=$1
+  local text=$2
 
+  HADOOP_SUBCMD_USAGE[${HADOOP_SUBCMD_USAGE_COUNTER}]="${subcmd}@${text}"
+  ((HADOOP_SUBCMD_USAGE_COUNTER=HADOOP_SUBCMD_USAGE_COUNTER+1))
+}
+
+## @description  Add an option to the usage output
+## @audience     private
+## @stability    evolving
+## @replaceable  no
+## @param        subcommand
+## @param        subcommanddesc
+function hadoop_add_option
+{
+  local option=$1
+  local text=$2
+
+  HADOOP_OPTION_USAGE[${HADOOP_OPTION_USAGE_COUNTER}]="${option}@${text}"
+  ((HADOOP_OPTION_USAGE_COUNTER=HADOOP_OPTION_USAGE_COUNTER+1))
+}
+
+## @description  Reset the usage information to blank
+## @audience     private
+## @stability    evolving
+## @replaceable  no
+function hadoop_reset_usage
+{
+  HADOOP_SUBCMD_USAGE=()
+  HADOOP_OPTION_USAGE=()
+  HADOOP_SUBCMD_USAGE_COUNTER=0
+  HADOOP_OPTION_USAGE_COUNTER=0
+}
+
+## @description  Print a screen-size aware two-column output
+## @audience     private
+## @stability    evolving
+## @replaceable  no
+## @param        array
+function hadoop_generic_columnprinter
+{
+  declare -a input=("$@")
+  declare -i i=0
+  declare -i counter=0
+  declare line
+  declare text
+  declare option
+  declare giventext
+  declare -i maxoptsize
+  declare -i foldsize
+  declare -a tmpa
+  declare numcols
+
+  if [[ -n "${COLUMNS}" ]]; then
+    numcols=${COLUMNS}
+  else
+    numcols=$(tput cols) 2>/dev/null
+  fi
+
+  if [[ -z "${numcols}"
+     || ! "${numcols}" =~ ^[0-9]+$ ]]; then
+    numcols=75
+  else
+    ((numcols=numcols-5))
+  fi
+
+  while read -r line; do
+    tmpa[${counter}]=${line}
+    ((counter=counter+1))
+    option=$(echo "${line}" | cut -f1 -d'@')
+    if [[ ${#option} -gt ${maxoptsize} ]]; then
+      maxoptsize=${#option}
+    fi
+  done < <(for text in "${input[@]}"; do
+    echo "${text}"
+  done | sort)
+
+  i=0
+  ((foldsize=numcols-maxoptsize))
+
+  until [[ $i -eq ${#tmpa[@]} ]]; do
+    option=$(echo "${tmpa[$i]}" | cut -f1 -d'@')
+    giventext=$(echo "${tmpa[$i]}" | cut -f2 -d'@')
+
+    while read -r line; do
+      printf "%-${maxoptsize}s   %-s\n" "${option}" "${line}"
+      option=" "
+    done < <(echo "${giventext}"| fold -s -w ${foldsize})
+    ((i=i+1))
+  done
+}
+
+## @description  generate standard usage output
+## @description  and optionally takes a class
+## @audience     private
+## @stability    evolving
+## @replaceable  no
+## @param        execname
+## @param        true|false
+## @param        [text to use in place of SUBCOMMAND]
+function hadoop_generate_usage
+{
+  local cmd=$1
+  local takesclass=$2
+  local subcmdtext=${3:-"SUBCOMMAND"}
+  local haveoptions
+  local optstring
+  local havesubs
+  local subcmdstring
+
+  cmd=${cmd##*/}
+
+  if [[ -n "${HADOOP_OPTION_USAGE_COUNTER}"
+        && "${HADOOP_OPTION_USAGE_COUNTER}" -gt 0 ]]; then
+    haveoptions=true
+    optstring=" [OPTIONS]"
+  fi
+
+  if [[ -n "${HADOOP_SUBCMD_USAGE_COUNTER}"
+        && "${HADOOP_SUBCMD_USAGE_COUNTER}" -gt 0 ]]; then
+    havesubs=true
+    subcmdstring=" ${subcmdtext} [${subcmdtext} OPTIONS]"
+  fi
+
+  echo "Usage: ${cmd}${optstring}${subcmdstring}"
+  if [[ ${takesclass} = true ]]; then
+    echo " or    ${cmd}${optstring} CLASSNAME [CLASSNAME OPTIONS]"
+    echo "  where CLASSNAME is a user-provided Java class"
+  fi
+
+  if [[ "${haveoptions}" = true ]]; then
+    echo ""
+    echo "  OPTIONS is none or any of:"
+    echo ""
+
+    hadoop_generic_columnprinter "${HADOOP_OPTION_USAGE[@]}"
+  fi
+
+  if [[ "${havesubs}" = true ]]; then
+    echo ""
+    echo "  ${subcmdtext} is one of:"
+    echo ""
+
+    hadoop_generic_columnprinter "${HADOOP_SUBCMD_USAGE[@]}"
+    echo ""
+    echo "${subcmdtext} may print help when invoked w/o parameters or with -h."
+  fi
+}
+
+## @description  Replace `oldvar` with `newvar` if `oldvar` exists.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        oldvar
+## @param        newvar
+function hadoop_deprecate_envvar
+{
+  local oldvar=$1
+  local newvar=$2
+  local oldval=${!oldvar}
+  local newval=${!newvar}
+
+  if [[ -n "${oldval}" ]]; then
+    hadoop_error "WARNING: ${oldvar} has been replaced by ${newvar}. Using value of ${oldvar}."
+    # shellcheck disable=SC2086
+    eval ${newvar}=\"${oldval}\"
+
+    # shellcheck disable=SC2086
+    newval=${oldval}
+
+    # shellcheck disable=SC2086
+    eval ${newvar}=\"${newval}\"
+  fi
+}
+
+## @description  Bootstraps the Hadoop shell environment
+## @audience     private
+## @stability    evolving
+## @replaceable  no
+function hadoop_bootstrap
+{
   # the root of the Hadoop installation
   # See HADOOP-6255 for the expected directory structure layout
-  
+
   # By now, HADOOP_LIBEXEC_DIR should have been defined upstream
   # We can piggyback off of that to figure out where the default
   # HADOOP_FREFIX should be.  This allows us to run without
@@ -48,7 +246,7 @@ function hadoop_bootstrap_init
   HADOOP_DEFAULT_PREFIX=$(cd -P -- "${HADOOP_LIBEXEC_DIR}/.." >/dev/null && pwd -P)
   HADOOP_PREFIX=${HADOOP_PREFIX:-$HADOOP_DEFAULT_PREFIX}
   export HADOOP_PREFIX
-  
+
   #
   # short-cuts. vendors may redefine these as well, preferably
   # in hadoop-layouts.sh
@@ -65,21 +263,24 @@ function hadoop_bootstrap_init
   # setup a default TOOL_PATH
   TOOL_PATH=${TOOL_PATH:-${HADOOP_PREFIX}/share/hadoop/tools/lib/*}
 
+  # usage output set to zero
+  hadoop_reset_usage
+
   export HADOOP_OS_TYPE=${HADOOP_OS_TYPE:-$(uname -s)}
- 
+
   # defaults
   export HADOOP_OPTS=${HADOOP_OPTS:-"-Djava.net.preferIPv4Stack=true"}
   hadoop_debug "Initial HADOOP_OPTS=${HADOOP_OPTS}"
 }
 
+## @description  Locate Hadoop's configuration directory
+## @audience     private
+## @stability    evolving
+## @replaceable  no
 function hadoop_find_confdir
 {
-  # NOTE: This function is not user replaceable.
-
   local conf_dir
-  # Look for the basic hadoop configuration area.
-  #
-  #
+
   # An attempt at compatibility with some Hadoop 1.x
   # installs.
   if [[ -e "${HADOOP_PREFIX}/conf/hadoop-env.sh" ]]; then
@@ -92,10 +293,26 @@ function hadoop_find_confdir
   hadoop_debug "HADOOP_CONF_DIR=${HADOOP_CONF_DIR}"
 }
 
+## @description  Validate ${HADOOP_CONF_DIR}
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @return       will exit on failure conditions
+function hadoop_verify_confdir
+{
+  # Check only log4j.properties by default.
+  # --loglevel does not work without logger settings in log4j.log4j.properties.
+  if [[ ! -f "${HADOOP_CONF_DIR}/log4j.properties" ]]; then
+    hadoop_error "WARNING: log4j.properties is not found. HADOOP_CONF_DIR may be incomplete."
+  fi
+}
+
+## @description  Import the hadoop-env.sh settings
+## @audience     private
+## @stability    evolving
+## @replaceable  no
 function hadoop_exec_hadoopenv
 {
-  # NOTE: This function is not user replaceable.
-
   if [[ -z "${HADOOP_ENV_PROCESSED}" ]]; then
     if [[ -f "${HADOOP_CONF_DIR}/hadoop-env.sh" ]]; then
       export HADOOP_ENV_PROCESSED=true
@@ -104,15 +321,139 @@ function hadoop_exec_hadoopenv
   fi
 }
 
+## @description  Import the replaced functions
+## @audience     private
+## @stability    evolving
+## @replaceable  no
 function hadoop_exec_userfuncs
 {
-  # NOTE: This function is not user replaceable.
-
   if [[ -e "${HADOOP_CONF_DIR}/hadoop-user-functions.sh" ]]; then
     . "${HADOOP_CONF_DIR}/hadoop-user-functions.sh"
   fi
 }
 
+## @description  Read the user's settings.  This provides for users to
+## @description  override and/or append hadoop-env.sh. It is not meant
+## @description  as a complete system override.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_exec_hadooprc
+{
+  if [[ -f "${HOME}/.hadooprc" ]]; then
+    hadoop_debug "Applying the user's .hadooprc"
+    . "${HOME}/.hadooprc"
+  fi
+}
+
+## @description  Import shellprofile.d content
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_import_shellprofiles
+{
+  local i
+  local files1
+  local files2
+
+  if [[ -d "${HADOOP_LIBEXEC_DIR}/shellprofile.d" ]]; then
+    files1=(${HADOOP_LIBEXEC_DIR}/shellprofile.d/*.sh)
+    hadoop_debug "shellprofiles: ${files1[*]}"
+  else
+    hadoop_error "WARNING: ${HADOOP_LIBEXEC_DIR}/shellprofile.d doesn't exist. Functionality may not work."
+  fi
+
+  if [[ -d "${HADOOP_CONF_DIR}/shellprofile.d" ]]; then
+    files2=(${HADOOP_CONF_DIR}/shellprofile.d/*.sh)
+  fi
+
+  for i in "${files1[@]}" "${files2[@]}"
+  do
+    if [[ -n "${i}"
+      && -f "${i}" ]]; then
+      hadoop_debug "Profiles: importing ${i}"
+      . "${i}"
+    fi
+  done
+}
+
+## @description  Initialize the registered shell profiles
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_shellprofiles_init
+{
+  local i
+
+  for i in ${HADOOP_SHELL_PROFILES}
+  do
+    if declare -F _${i}_hadoop_init >/dev/null ; then
+       hadoop_debug "Profiles: ${i} init"
+       # shellcheck disable=SC2086
+       _${i}_hadoop_init
+    fi
+  done
+}
+
+## @description  Apply the shell profile classpath additions
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_shellprofiles_classpath
+{
+  local i
+
+  for i in ${HADOOP_SHELL_PROFILES}
+  do
+    if declare -F _${i}_hadoop_classpath >/dev/null ; then
+       hadoop_debug "Profiles: ${i} classpath"
+       # shellcheck disable=SC2086
+       _${i}_hadoop_classpath
+    fi
+  done
+}
+
+## @description  Apply the shell profile native library additions
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_shellprofiles_nativelib
+{
+  local i
+
+  for i in ${HADOOP_SHELL_PROFILES}
+  do
+    if declare -F _${i}_hadoop_nativelib >/dev/null ; then
+       hadoop_debug "Profiles: ${i} nativelib"
+       # shellcheck disable=SC2086
+       _${i}_hadoop_nativelib
+    fi
+  done
+}
+
+## @description  Apply the shell profile final configuration
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_shellprofiles_finalize
+{
+  local i
+
+  for i in ${HADOOP_SHELL_PROFILES}
+  do
+    if declare -F _${i}_hadoop_finalize >/dev/null ; then
+       hadoop_debug "Profiles: ${i} finalize"
+       # shellcheck disable=SC2086
+       _${i}_hadoop_finalize
+    fi
+  done
+}
+
+## @description  Initialize the Hadoop shell environment, now that
+## @description  user settings have been imported
+## @audience     private
+## @stability    evolving
+## @replaceable  no
 function hadoop_basic_init
 {
   # Some of these are also set in hadoop-env.sh.
@@ -121,38 +462,57 @@ function hadoop_basic_init
   #
   # but it is important to note that if you update these
   # you also need to update hadoop-env.sh as well!!!
-  
-  # CLASSPATH initially contains $HADOOP_CONF_DIR
-  CLASSPATH="${HADOOP_CONF_DIR}"
-  hadoop_debug "Initial CLASSPATH=${HADOOP_CONF_DIR}"
-  
+
+  CLASSPATH=""
+  hadoop_debug "Initialize CLASSPATH"
+
   if [[ -z "${HADOOP_COMMON_HOME}" ]] &&
   [[ -d "${HADOOP_PREFIX}/${HADOOP_COMMON_DIR}" ]]; then
     export HADOOP_COMMON_HOME="${HADOOP_PREFIX}"
   fi
-  
+
   # default policy file for service-level authorization
   HADOOP_POLICYFILE=${HADOOP_POLICYFILE:-"hadoop-policy.xml"}
-  
+
   # define HADOOP_HDFS_HOME
   if [[ -z "${HADOOP_HDFS_HOME}" ]] &&
      [[ -d "${HADOOP_PREFIX}/${HDFS_DIR}" ]]; then
     export HADOOP_HDFS_HOME="${HADOOP_PREFIX}"
   fi
-  
+
   # define HADOOP_YARN_HOME
   if [[ -z "${HADOOP_YARN_HOME}" ]] &&
      [[ -d "${HADOOP_PREFIX}/${YARN_DIR}" ]]; then
     export HADOOP_YARN_HOME="${HADOOP_PREFIX}"
   fi
-  
+
   # define HADOOP_MAPRED_HOME
   if [[ -z "${HADOOP_MAPRED_HOME}" ]] &&
      [[ -d "${HADOOP_PREFIX}/${MAPRED_DIR}" ]]; then
     export HADOOP_MAPRED_HOME="${HADOOP_PREFIX}"
   fi
-  
-  HADOOP_IDENT_STRING=${HADOP_IDENT_STRING:-$USER}
+
+  if [[ ! -d "${HADOOP_COMMON_HOME}" ]]; then
+    hadoop_error "ERROR: Invalid HADOOP_COMMON_HOME"
+    exit 1
+  fi
+
+  if [[ ! -d "${HADOOP_HDFS_HOME}" ]]; then
+    hadoop_error "ERROR: Invalid HADOOP_HDFS_HOME"
+    exit 1
+  fi
+
+  if [[ ! -d "${HADOOP_YARN_HOME}" ]]; then
+    hadoop_error "ERROR: Invalid HADOOP_YARN_HOME"
+    exit 1
+  fi
+
+  if [[ ! -d "${HADOOP_MAPRED_HOME}" ]]; then
+    hadoop_error "ERROR: Invalid HADOOP_MAPRED_HOME"
+    exit 1
+  fi
+
+  HADOOP_IDENT_STRING=${HADOOP_IDENT_STRING:-$USER}
   HADOOP_LOG_DIR=${HADOOP_LOG_DIR:-"${HADOOP_PREFIX}/logs"}
   HADOOP_LOGFILE=${HADOOP_LOGFILE:-hadoop.log}
   HADOOP_LOGLEVEL=${HADOOP_LOGLEVEL:-INFO}
@@ -162,17 +522,21 @@ function hadoop_basic_init
   HADOOP_ROOT_LOGGER=${HADOOP_ROOT_LOGGER:-${HADOOP_LOGLEVEL},console}
   HADOOP_DAEMON_ROOT_LOGGER=${HADOOP_DAEMON_ROOT_LOGGER:-${HADOOP_LOGLEVEL},RFA}
   HADOOP_SECURITY_LOGGER=${HADOOP_SECURITY_LOGGER:-INFO,NullAppender}
-  HADOOP_HEAPSIZE=${HADOOP_HEAPSIZE:-1024}
   HADOOP_SSH_OPTS=${HADOOP_SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10s"}
   HADOOP_SECURE_LOG_DIR=${HADOOP_SECURE_LOG_DIR:-${HADOOP_LOG_DIR}}
   HADOOP_SECURE_PID_DIR=${HADOOP_SECURE_PID_DIR:-${HADOOP_PID_DIR}}
   HADOOP_SSH_PARALLEL=${HADOOP_SSH_PARALLEL:-10}
 }
 
-function hadoop_populate_slaves_file()
+## @description  Set the slave support information to the contents
+## @description  of `filename`
+## @audience     public
+## @stability    stable
+## @replaceable  no
+## @param        filename
+## @return       will exit if file does not exist
+function hadoop_populate_slaves_file
 {
-  # NOTE: This function is not user replaceable.
-
   local slavesfile=$1
   shift
   if [[ -f "${slavesfile}" ]]; then
@@ -181,18 +545,23 @@ function hadoop_populate_slaves_file()
   elif [[ -f "${HADOOP_CONF_DIR}/${slavesfile}" ]]; then
     # shellcheck disable=2034
     HADOOP_SLAVES="${HADOOP_CONF_DIR}/${slavesfile}"
-    # shellcheck disable=2034
-    YARN_SLAVES="${HADOOP_CONF_DIR}/${slavesfile}"
   else
     hadoop_error "ERROR: Cannot find hosts file \"${slavesfile}\""
     hadoop_exit_with_usage 1
   fi
 }
 
+## @description  Rotates the given `file` until `number` of
+## @description  files exist.
+## @audience     public
+## @stability    stable
+## @replaceable  no
+## @param        filename
+## @param        [number]
+## @return       $? will contain last mv's return value
 function hadoop_rotate_log
 {
   #
-  # log rotation (mainly used for .out files)
   # Users are likely to replace this one for something
   # that gzips or uses dates or who knows what.
   #
@@ -201,7 +570,7 @@ function hadoop_rotate_log
   #
   local log=$1;
   local num=${2:-5};
-  
+
   if [[ -f "${log}" ]]; then # rotate logs
     while [[ ${num} -gt 1 ]]; do
       #shellcheck disable=SC2086
@@ -215,22 +584,36 @@ function hadoop_rotate_log
   fi
 }
 
+## @description  Via ssh, log into `hostname` and run `command`
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        hostname
+## @param        command
+## @param        [...]
 function hadoop_actual_ssh
 {
   # we are passing this function to xargs
   # should get hostname followed by rest of command line
   local slave=$1
   shift
-  
+
   # shellcheck disable=SC2086
   ssh ${HADOOP_SSH_OPTS} ${slave} $"${@// /\\ }" 2>&1 | sed "s/^/$slave: /"
 }
 
+## @description  Connect to ${HADOOP_SLAVES} or ${HADOOP_SLAVE_NAMES}
+## @description  and execute command.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        command
+## @param        [...]
 function hadoop_connect_to_hosts
 {
   # shellcheck disable=SC2124
   local params="$@"
-  
+
   #
   # ssh (or whatever) to a host
   #
@@ -239,13 +622,13 @@ function hadoop_connect_to_hosts
     hadoop_error "ERROR: Both HADOOP_SLAVES and HADOOP_SLAVE_NAME were defined. Aborting."
     exit 1
   fi
-  
+
   if [[ -n "${HADOOP_SLAVE_NAMES}" ]] ; then
     SLAVE_NAMES=${HADOOP_SLAVE_NAMES}
   else
     SLAVE_FILE=${HADOOP_SLAVES:-${HADOOP_CONF_DIR}/slaves}
   fi
-  
+
   # if pdsh is available, let's use it.  otherwise default
   # to a loop around ssh.  (ugh)
   if [[ -e '/usr/bin/pdsh' ]]; then
@@ -265,21 +648,76 @@ function hadoop_connect_to_hosts
     if [[ -z "${SLAVE_NAMES}" ]]; then
       SLAVE_NAMES=$(sed 's/#.*$//;/^$/d' "${SLAVE_FILE}")
     fi
-    
-    # quoting here gets tricky. it's easier to push it into a function
-    # so that we don't have to deal with it. However...
-    # xargs can't use a function so instead we'll export it out
-    # and force it into a subshell
-    # moral of the story: just use pdsh.
-    export -f hadoop_actual_ssh
-    export HADOOP_SSH_OPTS
-    echo "${SLAVE_NAMES}" | \
-    xargs -n 1 -P"${HADOOP_SSH_PARALLEL}" \
-    -I {} bash -c --  "hadoop_actual_ssh {} ${params}"
-    wait
+    hadoop_connect_to_hosts_without_pdsh "${params}"
   fi
 }
 
+## @description  Connect to ${SLAVE_NAMES} and execute command
+## @description  under the environment which does not support pdsh.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        command
+## @param        [...]
+function hadoop_connect_to_hosts_without_pdsh
+{
+  # shellcheck disable=SC2124
+  local params="$@"
+  local slaves=(${SLAVE_NAMES})
+  for (( i = 0; i < ${#slaves[@]}; i++ ))
+  do
+    if (( i != 0 && i % HADOOP_SSH_PARALLEL == 0 )); then
+      wait
+    fi
+    # shellcheck disable=SC2086
+    hadoop_actual_ssh "${slaves[$i]}" ${params} &
+  done
+  wait
+}
+
+## @description  Utility routine to handle --slaves mode
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        commandarray
+function hadoop_common_slave_mode_execute
+{
+  #
+  # input should be the command line as given by the user
+  # in the form of an array
+  #
+  local argv=("$@")
+
+  # if --slaves is still on the command line, remove it
+  # to prevent loops
+  # Also remove --hostnames and --hosts along with arg values
+  local argsSize=${#argv[@]};
+  for (( i = 0; i < argsSize; i++ ))
+  do
+    if [[ "${argv[$i]}" =~ ^--slaves$ ]]; then
+      unset argv[$i]
+    elif [[ "${argv[$i]}" =~ ^--hostnames$ ]] ||
+      [[ "${argv[$i]}" =~ ^--hosts$ ]]; then
+      unset argv[$i];
+      let i++;
+      unset argv[$i];
+    fi
+  done
+  if [[ ${QATESTMODE} = true ]]; then
+    echo "${argv[@]}"
+    return
+  fi
+  hadoop_connect_to_hosts -- "${argv[@]}"
+}
+
+## @description  Verify that a shell command was passed a valid
+## @description  class name
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        classname
+## @return       0 = success
+## @return       1 = failure w/user message
 function hadoop_validate_classname
 {
   local class=$1
@@ -294,6 +732,14 @@ function hadoop_validate_classname
   return 0
 }
 
+## @description  Append the `appendstring` if `checkstring` is not
+## @description  present in the given `envvar`
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        envvar
+## @param        checkstring
+## @param        appendstring
 function hadoop_add_param
 {
   #
@@ -307,23 +753,42 @@ function hadoop_add_param
   # delimited
   #
   if [[ ! ${!1} =~ $2 ]] ; then
-    # shellcheck disable=SC2086
-    eval $1="'${!1} $3'"
+    #shellcheck disable=SC2140
+    eval "$1"="'${!1} $3'"
+    if [[ ${!1:0:1} = ' ' ]]; then
+      #shellcheck disable=SC2140
+      eval "$1"="'${!1# }'"
+    fi
     hadoop_debug "$1 accepted $3"
   else
     hadoop_debug "$1 declined $3"
   fi
 }
 
+## @description  Register the given `shellprofile` to the Hadoop
+## @description  shell subsystem
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        shellprofile
+function hadoop_add_profile
+{
+  # shellcheck disable=SC2086
+  hadoop_add_param HADOOP_SHELL_PROFILES $1 $1
+}
+
+## @description  Add a file system object (directory, file,
+## @description  wildcard, ...) to the classpath. Optionally provide
+## @description  a hint as to where in the classpath it should go.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        object
+## @param        [before|after]
+## @return       0 = success (added or duplicate)
+## @return       1 = failure (doesn't exist or some other reason)
 function hadoop_add_classpath
 {
-  # two params:
-  # $1 = directory, file, wildcard, whatever to add
-  # $2 = before or after, which determines where in the
-  #      classpath this object should go. default is after
-  # return 0 = success (added or duplicate)
-  # return 1 = failure (doesn't exist, whatever)
-  
   # However, with classpath (& JLP), we can do dedupe
   # along with some sanity checking (e.g., missing directories)
   # since we have a better idea of what is legal
@@ -331,12 +796,13 @@ function hadoop_add_classpath
   # for wildcard at end, we can
   # at least check the dir exists
   if [[ $1 =~ ^.*\*$ ]]; then
-    local mp=$(dirname "$1")
+    local mp
+    mp=$(dirname "$1")
     if [[ ! -d "${mp}" ]]; then
       hadoop_debug "Rejected CLASSPATH: $1 (not a dir)"
       return 1
     fi
-    
+
     # no wildcard in the middle, so check existence
     # (doesn't matter *what* it is)
   elif [[ ! $1 =~ ^.*\*.*$ ]] && [[ ! -e "$1" ]]; then
@@ -360,15 +826,23 @@ function hadoop_add_classpath
   return 0
 }
 
+## @description  Add a file system object (directory, file,
+## @description  wildcard, ...) to the colonpath.  Optionally provide
+## @description  a hint as to where in the colonpath it should go.
+## @description  Prior to adding, objects are checked for duplication
+## @description  and check for existence.  Many other functions use
+## @description  this function as their base implementation
+## @description  including `hadoop_add_javalibpath` and `hadoop_add_ldlibpath`.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        envvar
+## @param        object
+## @param        [before|after]
+## @return       0 = success (added or duplicate)
+## @return       1 = failure (doesn't exist or some other reason)
 function hadoop_add_colonpath
 {
-  # two params:
-  # $1 = directory, file, wildcard, whatever to add
-  # $2 = before or after, which determines where in the
-  #      classpath this object should go
-  # return 0 = success
-  # return 1 = failure (duplicate)
-  
   # this is CLASSPATH, JLP, etc but with dedupe but no
   # other checking
   if [[ -d "${2}" ]] && [[ ":${!1}:" != *":$2:"* ]]; then
@@ -382,7 +856,7 @@ function hadoop_add_colonpath
       hadoop_debug "Prepend colonpath($1): $2"
     else
       # shellcheck disable=SC2086
-      eval $1+="'$2'"
+      eval $1+=":'$2'"
       hadoop_debug "Append colonpath($1): $2"
     fi
     return 0
@@ -391,111 +865,83 @@ function hadoop_add_colonpath
   return 1
 }
 
+## @description  Add a file system object (directory, file,
+## @description  wildcard, ...) to the Java JNI path.  Optionally
+## @description  provide a hint as to where in the Java JNI path
+## @description  it should go.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        object
+## @param        [before|after]
+## @return       0 = success (added or duplicate)
+## @return       1 = failure (doesn't exist or some other reason)
 function hadoop_add_javalibpath
 {
   # specialized function for a common use case
   hadoop_add_colonpath JAVA_LIBRARY_PATH "$1" "$2"
 }
 
+## @description  Add a file system object (directory, file,
+## @description  wildcard, ...) to the LD_LIBRARY_PATH.  Optionally
+## @description  provide a hint as to where in the LD_LIBRARY_PATH
+## @description  it should go.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        object
+## @param        [before|after]
+## @return       0 = success (added or duplicate)
+## @return       1 = failure (doesn't exist or some other reason)
 function hadoop_add_ldlibpath
 {
+  local status
   # specialized function for a common use case
   hadoop_add_colonpath LD_LIBRARY_PATH "$1" "$2"
-  
+  status=$?
+
   # note that we export this
   export LD_LIBRARY_PATH
+  return ${status}
 }
 
-function hadoop_add_to_classpath_common
+## @description  Add the common/core Hadoop components to the
+## @description  environment
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @returns      1 on failure, may exit
+## @returns      0 on success
+function hadoop_add_common_to_classpath
 {
-  
   #
   # get all of the common jars+config in the path
   #
-  
+
+  if [[ -z "${HADOOP_COMMON_HOME}"
+    || -z "${HADOOP_COMMON_DIR}"
+    || -z "${HADOOP_COMMON_LIB_JARS_DIR}" ]]; then
+    hadoop_debug "COMMON_HOME=${HADOOP_COMMON_HOME}"
+    hadoop_debug "COMMON_DIR=${HADOOP_COMMON_DIR}"
+    hadoop_debug "COMMON_LIB_JARS_DIR=${HADOOP_COMMON_LIB_JARS_DIR}"
+    hadoop_error "ERROR: HADOOP_COMMON_HOME or related vars are not configured."
+    exit 1
+  fi
+
   # developers
   if [[ -n "${HADOOP_ENABLE_BUILD_PATHS}" ]]; then
     hadoop_add_classpath "${HADOOP_COMMON_HOME}/hadoop-common/target/classes"
   fi
-  
-  if [[ -d "${HADOOP_COMMON_HOME}/${HADOOP_COMMON_DIR}/webapps" ]]; then
-    hadoop_add_classpath "${HADOOP_COMMON_HOME}/${HADOOP_COMMON_DIR}"
-  fi
-  
+
   hadoop_add_classpath "${HADOOP_COMMON_HOME}/${HADOOP_COMMON_LIB_JARS_DIR}"'/*'
   hadoop_add_classpath "${HADOOP_COMMON_HOME}/${HADOOP_COMMON_DIR}"'/*'
 }
 
-function hadoop_add_to_classpath_hdfs
-{
-  #
-  # get all of the hdfs jars+config in the path
-  #
-  # developers
-  if [[ -n "${HADOOP_ENABLE_BUILD_PATHS}" ]]; then
-    hadoop_add_classpath "${HADOOP_HDFS_HOME}/hadoop-hdfs/target/classes"
-  fi
-  
-  # put hdfs in classpath if present
-  if [[ -d "${HADOOP_HDFS_HOME}/${HDFS_DIR}/webapps" ]]; then
-    hadoop_add_classpath "${HADOOP_HDFS_HOME}/${HDFS_DIR}"
-  fi
-  
-  hadoop_add_classpath "${HADOOP_HDFS_HOME}/${HDFS_LIB_JARS_DIR}"'/*'
-  hadoop_add_classpath "${HADOOP_HDFS_HOME}/${HDFS_DIR}"'/*'
-}
-
-function hadoop_add_to_classpath_yarn
-{
-  local i
-  #
-  # get all of the yarn jars+config in the path
-  #
-  # developers
-  if [[ -n "${HADOOP_ENABLE_BUILD_PATHS}" ]]; then
-    for i in yarn-api yarn-common yarn-mapreduce yarn-master-worker \
-    yarn-server/yarn-server-nodemanager \
-    yarn-server/yarn-server-common \
-    yarn-server/yarn-server-resourcemanager; do
-      hadoop_add_classpath "${HADOOP_YARN_HOME}/$i/target/classes"
-    done
-    
-    hadoop_add_classpath "${HADOOP_YARN_HOME}/build/test/classes"
-    hadoop_add_classpath "${HADOOP_YARN_HOME}/build/tools"
-  fi
-  
-  if [[ -d "${HADOOP_YARN_HOME}/${YARN_DIR}/webapps" ]]; then
-    hadoop_add_classpath "${HADOOP_YARN_HOME}/${YARN_DIR}"
-  fi
-  
-  hadoop_add_classpath "${HADOOP_YARN_HOME}/${YARN_LIB_JARS_DIR}"'/*'
-  hadoop_add_classpath  "${HADOOP_YARN_HOME}/${YARN_DIR}"'/*'
-}
-
-function hadoop_add_to_classpath_mapred
-{
-  #
-  # get all of the mapreduce jars+config in the path
-  #
-  # developers
-  if [[ -n "${HADOOP_ENABLE_BUILD_PATHS}" ]]; then
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-shuffle/target/classes"
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-common/target/classes"
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-hs/target/classes"
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-hs-plugins/target/classes"
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-app/target/classes"
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-jobclient/target/classes"
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/hadoop-mapreduce-client-core/target/classes"
-  fi
-  
-  if [[ -d "${HADOOP_MAPRED_HOME}/${MAPRED_DIR}/webapps" ]]; then
-    hadoop_add_classpath "${HADOOP_MAPRED_HOME}/${MAPRED_DIR}"
-  fi
-  
-  hadoop_add_classpath "${HADOOP_MAPRED_HOME}/${MAPRED_LIB_JARS_DIR}"'/*'
-  hadoop_add_classpath "${HADOOP_MAPRED_HOME}/${MAPRED_DIR}"'/*'
-}
-
+## @description  Add the user's custom classpath settings to the
+## @description  environment
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_add_to_classpath_userpath
 {
   # Add the user-specified HADOOP_CLASSPATH to the
@@ -505,73 +951,95 @@ function hadoop_add_to_classpath_userpath
   # set env-var HADOOP_USER_CLASSPATH_FIRST
   # we'll also dedupe it, because we're cool like that.
   #
-  local c
-  local array
-  local i
-  local j
-  let c=0
+  declare -a array
+  declare -i c=0
+  declare -i j
+  declare -i i
+  declare idx
 
   if [[ -n "${HADOOP_CLASSPATH}" ]]; then
     # I wonder if Java runs on VMS.
-    for i in $(echo "${HADOOP_CLASSPATH}" | tr : '\n'); do
-      array[$c]=$i
-      let c+=1
+    for idx in $(echo "${HADOOP_CLASSPATH}" | tr : '\n'); do
+      array[${c}]=${idx}
+      ((c=c+1))
     done
-    let j=c-1
-    
+    ((j=c-1))
+
     if [[ -z "${HADOOP_USE_CLIENT_CLASSLOADER}" ]]; then
       if [[ -z "${HADOOP_USER_CLASSPATH_FIRST}" ]]; then
-        for ((i=j; i>=0; i--)); do
-          hadoop_add_classpath "${array[$i]}" before
-        done
-      else
         for ((i=0; i<=j; i++)); do
           hadoop_add_classpath "${array[$i]}" after
+        done
+      else
+        for ((i=j; i>=0; i--)); do
+          hadoop_add_classpath "${array[$i]}" before
         done
       fi
     fi
   fi
 }
 
+## @description  Routine to configure any OS-specific settings.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @return       may exit on failure conditions
 function hadoop_os_tricks
 {
   local bindv6only
 
-  # some OSes have special needs. here's some out of the box
-  # examples for OS X and Linux. Vendors, replace this with your special sauce.
+  HADOOP_IS_CYGWIN=false
   case ${HADOOP_OS_TYPE} in
     Darwin)
       if [[ -z "${JAVA_HOME}" ]]; then
         if [[ -x /usr/libexec/java_home ]]; then
-          export JAVA_HOME="$(/usr/libexec/java_home)"
+          JAVA_HOME="$(/usr/libexec/java_home)"
+          export JAVA_HOME
         else
-          export JAVA_HOME=/Library/Java/Home
+          JAVA_HOME=/Library/Java/Home
+          export JAVA_HOME
         fi
       fi
     ;;
     Linux)
-      bindv6only=$(/sbin/sysctl -n net.ipv6.bindv6only 2> /dev/null)
+
+      # Newer versions of glibc use an arena memory allocator that
+      # causes virtual # memory usage to explode. This interacts badly
+      # with the many threads that we use in Hadoop. Tune the variable
+      # down to prevent vmem explosion.
+      export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-4}
+      # we put this in QA test mode off so that non-Linux can test
+      if [[ "${QATESTMODE}" = true ]]; then
+        return
+      fi
 
       # NOTE! HADOOP_ALLOW_IPV6 is a developer hook.  We leave it
       # undocumented in hadoop-env.sh because we don't want users to
       # shoot themselves in the foot while devs make IPv6 work.
-      if [[ -n "${bindv6only}" ]] && 
-         [[ "${bindv6only}" -eq "1" ]] && 
+
+      bindv6only=$(/sbin/sysctl -n net.ipv6.bindv6only 2> /dev/null)
+
+      if [[ -n "${bindv6only}" ]] &&
+         [[ "${bindv6only}" -eq "1" ]] &&
          [[ "${HADOOP_ALLOW_IPV6}" != "yes" ]]; then
         hadoop_error "ERROR: \"net.ipv6.bindv6only\" is set to 1 "
         hadoop_error "ERROR: Hadoop networking could be broken. Aborting."
         hadoop_error "ERROR: For more info: http://wiki.apache.org/hadoop/HadoopIPv6"
         exit 1
       fi
-      # Newer versions of glibc use an arena memory allocator that
-      # causes virtual # memory usage to explode. This interacts badly
-      # with the many threads that we use in Hadoop. Tune the variable
-      # down to prevent vmem explosion.
-      export MALLOC_ARENA_MAX=${MALLOC_ARENA_MAX:-4}
+    ;;
+    CYGWIN*)
+      # Flag that we're running on Cygwin to trigger path translation later.
+      HADOOP_IS_CYGWIN=true
     ;;
   esac
 }
 
+## @description  Configure/verify ${JAVA_HOME}
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @return       may exit on failure conditions
 function hadoop_java_setup
 {
   # Bail if we did not detect it
@@ -579,78 +1047,179 @@ function hadoop_java_setup
     hadoop_error "ERROR: JAVA_HOME is not set and could not be found."
     exit 1
   fi
-  
+
   if [[ ! -d "${JAVA_HOME}" ]]; then
     hadoop_error "ERROR: JAVA_HOME ${JAVA_HOME} does not exist."
     exit 1
   fi
-  
+
   JAVA="${JAVA_HOME}/bin/java"
-  
+
   if [[ ! -x "$JAVA" ]]; then
     hadoop_error "ERROR: $JAVA is not executable."
     exit 1
   fi
-  # shellcheck disable=SC2034
-  JAVA_HEAP_MAX=-Xmx1g
-  HADOOP_HEAPSIZE=${HADOOP_HEAPSIZE:-1024}
-  
-  # check envvars which might override default args
-  if [[ -n "$HADOOP_HEAPSIZE" ]]; then
-    # shellcheck disable=SC2034
-    JAVA_HEAP_MAX="-Xmx${HADOOP_HEAPSIZE}m"
-  fi
 }
 
+## @description  Finish Java JNI paths prior to execution
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_finalize_libpaths
 {
   if [[ -n "${JAVA_LIBRARY_PATH}" ]]; then
+    hadoop_translate_cygwin_path JAVA_LIBRARY_PATH
     hadoop_add_param HADOOP_OPTS java.library.path \
-    "-Djava.library.path=${JAVA_LIBRARY_PATH}"
+      "-Djava.library.path=${JAVA_LIBRARY_PATH}"
     export LD_LIBRARY_PATH
   fi
 }
 
-#
-# fill in any last minute options that might not have been defined yet
-#
+## @description  Finish Java heap parameters prior to execution
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_finalize_hadoop_heap
+{
+  if [[ -n "${HADOOP_HEAPSIZE_MAX}" ]]; then
+    if [[ "${HADOOP_HEAPSIZE_MAX}" =~ ^[0-9]+$ ]]; then
+      HADOOP_HEAPSIZE_MAX="${HADOOP_HEAPSIZE_MAX}m"
+    fi
+    hadoop_add_param HADOOP_OPTS Xmx "-Xmx${HADOOP_HEAPSIZE_MAX}"
+  fi
+
+  # backwards compatibility
+  if [[ -n "${HADOOP_HEAPSIZE}" ]]; then
+    if [[ "${HADOOP_HEAPSIZE}" =~ ^[0-9]+$ ]]; then
+      HADOOP_HEAPSIZE="${HADOOP_HEAPSIZE}m"
+    fi
+    hadoop_add_param HADOOP_OPTS Xmx "-Xmx${HADOOP_HEAPSIZE}"
+  fi
+
+  if [[ -n "${HADOOP_HEAPSIZE_MIN}" ]]; then
+    if [[ "${HADOOP_HEAPSIZE_MIN}" =~ ^[0-9]+$ ]]; then
+      HADOOP_HEAPSIZE_MIN="${HADOOP_HEAPSIZE_MIN}m"
+    fi
+    hadoop_add_param HADOOP_OPTS Xms "-Xms${HADOOP_HEAPSIZE_MIN}"
+  fi
+}
+
+## @description  Converts the contents of the variable name
+## @description  `varnameref` into the equivalent Windows path.
+## @description  If the second parameter is true, then `varnameref`
+## @description  is treated as though it was a path list.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        varnameref
+## @param        [true]
+function hadoop_translate_cygwin_path
+{
+  if [[ "${HADOOP_IS_CYGWIN}" = "true" ]]; then
+    if [[ "$2" = "true" ]]; then
+      #shellcheck disable=SC2016
+      eval "$1"='$(cygpath -p -w "${!1}" 2>/dev/null)'
+    else
+      #shellcheck disable=SC2016
+      eval "$1"='$(cygpath -w "${!1}" 2>/dev/null)'
+    fi
+  fi
+}
+
+## @description  Finish configuring Hadoop specific system properties
+## @description  prior to executing Java
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_finalize_hadoop_opts
 {
+  hadoop_translate_cygwin_path HADOOP_LOG_DIR
   hadoop_add_param HADOOP_OPTS hadoop.log.dir "-Dhadoop.log.dir=${HADOOP_LOG_DIR}"
   hadoop_add_param HADOOP_OPTS hadoop.log.file "-Dhadoop.log.file=${HADOOP_LOGFILE}"
-  hadoop_add_param HADOOP_OPTS hadoop.home.dir "-Dhadoop.home.dir=${HADOOP_PREFIX}"
+  HADOOP_HOME=${HADOOP_PREFIX}
+  hadoop_translate_cygwin_path HADOOP_HOME
+  export HADOOP_HOME
+  hadoop_add_param HADOOP_OPTS hadoop.home.dir "-Dhadoop.home.dir=${HADOOP_HOME}"
   hadoop_add_param HADOOP_OPTS hadoop.id.str "-Dhadoop.id.str=${HADOOP_IDENT_STRING}"
   hadoop_add_param HADOOP_OPTS hadoop.root.logger "-Dhadoop.root.logger=${HADOOP_ROOT_LOGGER}"
   hadoop_add_param HADOOP_OPTS hadoop.policy.file "-Dhadoop.policy.file=${HADOOP_POLICYFILE}"
   hadoop_add_param HADOOP_OPTS hadoop.security.logger "-Dhadoop.security.logger=${HADOOP_SECURITY_LOGGER}"
 }
 
+## @description  Finish Java classpath prior to execution
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_finalize_classpath
 {
   hadoop_add_classpath "${HADOOP_CONF_DIR}" before
-  
+
   # user classpath gets added at the last minute. this allows
   # override of CONF dirs and more
   hadoop_add_to_classpath_userpath
+  hadoop_translate_cygwin_path CLASSPATH true
 }
 
+## @description  Finish Catalina configuration prior to execution
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+function hadoop_finalize_catalina_opts
+{
+
+  local prefix=${HADOOP_CATALINA_PREFIX}
+
+  hadoop_add_param CATALINA_OPTS hadoop.home.dir "-Dhadoop.home.dir=${HADOOP_PREFIX}"
+  if [[ -n "${JAVA_LIBRARY_PATH}" ]]; then
+    hadoop_add_param CATALINA_OPTS java.library.path "-Djava.library.path=${JAVA_LIBRARY_PATH}"
+  fi
+  hadoop_add_param CATALINA_OPTS "${prefix}.home.dir" "-D${prefix}.home.dir=${HADOOP_PREFIX}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.config.dir" "-D${prefix}.config.dir=${HADOOP_CATALINA_CONFIG}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.log.dir" "-D${prefix}.log.dir=${HADOOP_CATALINA_LOG}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.temp.dir" "-D${prefix}.temp.dir=${HADOOP_CATALINA_TEMP}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.admin.port" "-D${prefix}.admin.port=${HADOOP_CATALINA_ADMIN_PORT}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.http.port" "-D${prefix}.http.port=${HADOOP_CATALINA_HTTP_PORT}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.max.threads" "-D${prefix}.max.threads=${HADOOP_CATALINA_MAX_THREADS}"
+  hadoop_add_param CATALINA_OPTS "${prefix}.ssl.keystore.file" "-D${prefix}.ssl.keystore.file=${HADOOP_CATALINA_SSL_KEYSTORE_FILE}"
+}
+
+## @description  Finish all the remaining environment settings prior
+## @description  to executing Java.  This is a wrapper that calls
+## @description  the other `finalize` routines.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_finalize
 {
-  # user classpath gets added at the last minute. this allows
-  # override of CONF dirs and more
+  hadoop_shellprofiles_finalize
+
   hadoop_finalize_classpath
   hadoop_finalize_libpaths
+  hadoop_finalize_hadoop_heap
   hadoop_finalize_hadoop_opts
+
+  hadoop_translate_cygwin_path HADOOP_PREFIX
+  hadoop_translate_cygwin_path HADOOP_CONF_DIR
+  hadoop_translate_cygwin_path HADOOP_COMMON_HOME
+  hadoop_translate_cygwin_path HADOOP_HDFS_HOME
+  hadoop_translate_cygwin_path HADOOP_YARN_HOME
+  hadoop_translate_cygwin_path HADOOP_MAPRED_HOME
 }
 
+## @description  Print usage information and exit with the passed
+## @description  `exitcode`
+## @audience     public
+## @stability    stable
+## @replaceable  no
+## @param        exitcode
+## @return       This function will always exit.
 function hadoop_exit_with_usage
 {
-  # NOTE: This function is not user replaceable.
-
   local exitcode=$1
   if [[ -z $exitcode ]]; then
     exitcode=1
   fi
+  # shellcheck disable=SC2034
   if declare -F hadoop_usage >/dev/null ; then
     hadoop_usage
   elif [[ -x /usr/bin/cowsay ]]; then
@@ -661,12 +1230,18 @@ function hadoop_exit_with_usage
   exit $exitcode
 }
 
+## @description  Verify that prerequisites have been met prior to
+## @description  excuting a privileged program.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @return       This routine may exit.
 function hadoop_verify_secure_prereq
 {
   # if you are on an OS like Illumos that has functional roles
   # and you are using pfexec, you'll probably want to change
   # this.
-  
+
   # ${EUID} comes from the shell itself!
   if [[ "${EUID}" -ne 0 ]] && [[ -z "${HADOOP_SECURE_COMMAND}" ]]; then
     hadoop_error "ERROR: You must be a privileged user in order to run a secure service."
@@ -676,14 +1251,20 @@ function hadoop_verify_secure_prereq
   fi
 }
 
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_setup_secure_service
 {
   # need a more complicated setup? replace me!
-  
+
   HADOOP_PID_DIR=${HADOOP_SECURE_PID_DIR}
   HADOOP_LOG_DIR=${HADOOP_SECURE_LOG_DIR}
 }
 
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_verify_piddir
 {
   if [[ -z "${HADOOP_PID_DIR}" ]]; then
@@ -706,6 +1287,9 @@ function hadoop_verify_piddir
   rm "${HADOOP_PID_DIR}/$$" >/dev/null 2>&1
 }
 
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
 function hadoop_verify_logdir
 {
   if [[ -z "${HADOOP_LOG_DIR}" ]]; then
@@ -728,7 +1312,14 @@ function hadoop_verify_logdir
   rm "${HADOOP_LOG_DIR}/$$" >/dev/null 2>&1
 }
 
-function hadoop_status_daemon() 
+## @description  Determine the status of the daemon referenced
+## @description  by `pidfile`
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        pidfile
+## @return       (mostly) LSB 4.1.0 compatible status
+function hadoop_status_daemon
 {
   #
   # LSB 4.1.0 compatible status command (1)
@@ -745,12 +1336,12 @@ function hadoop_status_daemon()
   #     them the benefit of a doubt and returning 1 even if
   #     our pid is not in in /var/run .
   #
-  
+
   local pidfile=$1
   shift
-  
+
   local pid
-  
+
   if [[ -f "${pidfile}" ]]; then
     pid=$(cat "${pidfile}")
     if ps -p "${pid}" > /dev/null 2>&1; then
@@ -761,6 +1352,14 @@ function hadoop_status_daemon()
   return 3
 }
 
+## @description  Execute the Java `class`, passing along any `options`.
+## @description  Additionally, set the Java property -Dproc_`command`.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        command
+## @param        class
+## @param        [options]
 function hadoop_java_exec
 {
   # run a java command.  this is used for
@@ -769,15 +1368,27 @@ function hadoop_java_exec
   local command=$1
   local class=$2
   shift 2
-  
+
   hadoop_debug "Final CLASSPATH: ${CLASSPATH}"
   hadoop_debug "Final HADOOP_OPTS: ${HADOOP_OPTS}"
+  hadoop_debug "Final JAVA_HOME: ${JAVA_HOME}"
+  hadoop_debug "java: ${JAVA}"
+  hadoop_debug "Class name: ${class}"
+  hadoop_debug "Command line options: $*"
 
   export CLASSPATH
   #shellcheck disable=SC2086
   exec "${JAVA}" "-Dproc_${command}" ${HADOOP_OPTS} "${class}" "$@"
 }
 
+## @description  Start a non-privileged daemon in the foreground.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        command
+## @param        class
+## @param        pidfile
+## @param        [options]
 function hadoop_start_daemon
 {
   # this is our non-privileged daemon starter
@@ -790,6 +1401,10 @@ function hadoop_start_daemon
 
   hadoop_debug "Final CLASSPATH: ${CLASSPATH}"
   hadoop_debug "Final HADOOP_OPTS: ${HADOOP_OPTS}"
+  hadoop_debug "Final JAVA_HOME: ${JAVA_HOME}"
+  hadoop_debug "java: ${JAVA}"
+  hadoop_debug "Class name: ${class}"
+  hadoop_debug "Command line options: $*"
 
   # this is for the non-daemon pid creation
   #shellcheck disable=SC2086
@@ -803,10 +1418,17 @@ function hadoop_start_daemon
   exec "${JAVA}" "-Dproc_${command}" ${HADOOP_OPTS} "${class}" "$@"
 }
 
+## @description  Start a non-privileged daemon in the background.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        command
+## @param        class
+## @param        pidfile
+## @param        outfile
+## @param        [options]
 function hadoop_start_daemon_wrapper
 {
-  # this is our non-privileged daemon start
-  # that fires up a daemon in the *background*
   local daemonname=$1
   local class=$2
   local pidfile=$3
@@ -816,14 +1438,14 @@ function hadoop_start_daemon_wrapper
   local counter
 
   hadoop_rotate_log "${outfile}"
-  
+
   hadoop_start_daemon "${daemonname}" \
     "$class" \
     "${pidfile}" \
     "$@" >> "${outfile}" 2>&1 < /dev/null &
 
   # we need to avoid a race condition here
-  # so let's wait for the fork to finish 
+  # so let's wait for the fork to finish
   # before overriding with the daemonized pid
   (( counter=0 ))
   while [[ ! -f ${pidfile} && ${counter} -le 5 ]]; do
@@ -837,23 +1459,23 @@ function hadoop_start_daemon_wrapper
   if [[ $? -gt 0 ]]; then
     hadoop_error "ERROR:  Cannot write ${daemonname} pid ${pidfile}."
   fi
-  
+
   # shellcheck disable=SC2086
   renice "${HADOOP_NICENESS}" $! >/dev/null 2>&1
   if [[ $? -gt 0 ]]; then
     hadoop_error "ERROR: Cannot set priority of ${daemonname} process $!"
   fi
-  
+
   # shellcheck disable=SC2086
   disown %+ >/dev/null 2>&1
   if [[ $? -gt 0 ]]; then
     hadoop_error "ERROR: Cannot disconnect ${daemonname} process $!"
   fi
   sleep 1
-  
+
   # capture the ulimit output
   ulimit -a >> "${outfile}" 2>&1
-  
+
   # shellcheck disable=SC2086
   if ! ps -p $! >/dev/null 2>&1; then
     return 1
@@ -861,28 +1483,40 @@ function hadoop_start_daemon_wrapper
   return 0
 }
 
+## @description  Start a privileged daemon in the foreground.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        command
+## @param        class
+## @param        daemonpidfile
+## @param        daemonoutfile
+## @param        daemonerrfile
+## @param        wrapperpidfile
+## @param        [options]
 function hadoop_start_secure_daemon
 {
   # this is used to launch a secure daemon in the *foreground*
   #
   local daemonname=$1
   local class=$2
-  
+
   # pid file to create for our deamon
   local daemonpidfile=$3
-  
+
   # where to send stdout. jsvc has bad habits so this *may* be &1
   # which means you send it to stdout!
   local daemonoutfile=$4
-  
+
   # where to send stderr.  same thing, except &2 = stderr
   local daemonerrfile=$5
   local privpidfile=$6
   shift 6
- 
+
   hadoop_rotate_log "${daemonoutfile}"
   hadoop_rotate_log "${daemonerrfile}"
-  
+
+  # shellcheck disable=SC2153
   jsvc="${JSVC_HOME}/jsvc"
   if [[ ! -f "${jsvc}" ]]; then
     hadoop_error "JSVC_HOME is not set or set incorrectly. jsvc is required to run secure"
@@ -891,20 +1525,25 @@ function hadoop_start_secure_daemon
     hadoop_error "and set JSVC_HOME to the directory containing the jsvc binary."
     exit 1
   fi
-  
+
   # note that shellcheck will throw a
   # bogus for-our-use-case 2086 here.
   # it doesn't properly support multi-line situations
 
   hadoop_debug "Final CLASSPATH: ${CLASSPATH}"
   hadoop_debug "Final HADOOP_OPTS: ${HADOOP_OPTS}"
+  hadoop_debug "Final JSVC_HOME: ${JSVC_HOME}"
+  hadoop_debug "jsvc: ${jsvc}"
+  hadoop_debug "Class name: ${class}"
+  hadoop_debug "Command line options: $*"
 
   #shellcheck disable=SC2086
   echo $$ > "${privpidfile}" 2>/dev/null
   if [[ $? -gt 0 ]]; then
     hadoop_error "ERROR:  Cannot write ${daemonname} pid ${privpidfile}."
   fi
-  
+
+  # shellcheck disable=SC2086
   exec "${jsvc}" \
     "-Dproc_${daemonname}" \
     -outfile "${daemonoutfile}" \
@@ -917,35 +1556,47 @@ function hadoop_start_secure_daemon
     "${class}" "$@"
 }
 
+## @description  Start a privileged daemon in the background.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        command
+## @param        class
+## @param        daemonpidfile
+## @param        daemonoutfile
+## @param        wrapperpidfile
+## @param        warpperoutfile
+## @param        daemonerrfile
+## @param        [options]
 function hadoop_start_secure_daemon_wrapper
 {
   # this wraps hadoop_start_secure_daemon to take care
   # of the dirty work to launch a daemon in the background!
   local daemonname=$1
   local class=$2
-  
+
   # same rules as hadoop_start_secure_daemon except we
   # have some additional parameters
-  
+
   local daemonpidfile=$3
-  
+
   local daemonoutfile=$4
-  
+
   # the pid file of the subprocess that spawned our
   # secure launcher
   local jsvcpidfile=$5
-  
+
   # the output of the subprocess that spawned our secure
   # launcher
   local jsvcoutfile=$6
-  
+
   local daemonerrfile=$7
   shift 7
 
   local counter
-  
+
   hadoop_rotate_log "${jsvcoutfile}"
-  
+
   hadoop_start_secure_daemon \
     "${daemonname}" \
     "${class}" \
@@ -955,7 +1606,7 @@ function hadoop_start_secure_daemon_wrapper
     "${jsvcpidfile}"  "$@" >> "${jsvcoutfile}" 2>&1 < /dev/null &
 
   # we need to avoid a race condition here
-  # so let's wait for the fork to finish 
+  # so let's wait for the fork to finish
   # before overriding with the daemonized pid
   (( counter=0 ))
   while [[ ! -f ${daemonpidfile} && ${counter} -le 5 ]]; do
@@ -969,7 +1620,7 @@ function hadoop_start_secure_daemon_wrapper
   if [[ $? -gt 0 ]]; then
     hadoop_error "ERROR:  Cannot write ${daemonname} pid ${daemonpidfile}."
   fi
-  
+
   sleep 1
   #shellcheck disable=SC2086
   renice "${HADOOP_NICENESS}" $! >/dev/null 2>&1
@@ -997,17 +1648,24 @@ function hadoop_start_secure_daemon_wrapper
   return 0
 }
 
+## @description  Stop the non-privileged `command` daemon with that
+## @description  that is running at `pidfile`.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        command
+## @param        pidfile
 function hadoop_stop_daemon
 {
   local cmd=$1
   local pidfile=$2
   shift 2
-  
+
   local pid
-  
+
   if [[ -f "${pidfile}" ]]; then
     pid=$(cat "$pidfile")
-    
+
     kill "${pid}" >/dev/null 2>&1
     sleep "${HADOOP_STOP_TIMEOUT}"
     if kill -0 "${pid}" > /dev/null 2>&1; then
@@ -1022,6 +1680,15 @@ function hadoop_stop_daemon
   fi
 }
 
+## @description  Stop the privileged `command` daemon with that
+## @description  that is running at `daemonpidfile` and launched with
+## @description  the wrapper at `wrapperpidfile`.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        command
+## @param        daemonpidfile
+## @param        wrapperpidfile
 function hadoop_stop_secure_daemon
 {
   local command=$1
@@ -1029,13 +1696,23 @@ function hadoop_stop_secure_daemon
   local privpidfile=$3
   shift 3
   local ret
-  
+
   hadoop_stop_daemon "${command}" "${daemonpidfile}"
   ret=$?
   rm -f "${daemonpidfile}" "${privpidfile}" 2>/dev/null
   return ${ret}
 }
 
+## @description  Manage a non-privileged daemon.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        [start|stop|status|default]
+## @param        command
+## @param        class
+## @param        daemonpidfile
+## @param        daemonoutfile
+## @param        [options]
 function hadoop_daemon_handler
 {
   local daemonmode=$1
@@ -1044,18 +1721,18 @@ function hadoop_daemon_handler
   local daemon_pidfile=$4
   local daemon_outfile=$5
   shift 5
-  
+
   case ${daemonmode} in
     status)
       hadoop_status_daemon "${daemon_pidfile}"
       exit $?
     ;;
-    
+
     stop)
       hadoop_stop_daemon "${daemonname}" "${daemon_pidfile}"
       exit $?
     ;;
-    
+
     ##COMPAT  -- older hadoops would also start daemons by default
     start|default)
       hadoop_verify_piddir
@@ -1080,6 +1757,19 @@ function hadoop_daemon_handler
   esac
 }
 
+## @description  Manage a privileged daemon.
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        [start|stop|status|default]
+## @param        command
+## @param        class
+## @param        daemonpidfile
+## @param        daemonoutfile
+## @param        wrapperpidfile
+## @param        wrapperoutfile
+## @param        wrappererrfile
+## @param        [options]
 function hadoop_secure_daemon_handler
 {
   local daemonmode=$1
@@ -1091,19 +1781,19 @@ function hadoop_secure_daemon_handler
   local priv_outfile=$7
   local priv_errfile=$8
   shift 8
-  
+
   case ${daemonmode} in
     status)
       hadoop_status_daemon "${daemon_pidfile}"
       exit $?
     ;;
-    
+
     stop)
       hadoop_stop_secure_daemon "${daemonname}" \
       "${daemon_pidfile}" "${priv_pidfile}"
       exit $?
     ;;
-    
+
     ##COMPAT  -- older hadoops would also start daemons by default
     start|default)
       hadoop_verify_piddir
@@ -1116,7 +1806,7 @@ function hadoop_secure_daemon_handler
         # stale pid file, so just remove it and continue on
         rm -f "${daemon_pidfile}" >/dev/null 2>&1
       fi
-      
+
       ##COMPAT  - differenticate between --daemon start and nothing
       # "nothing" shouldn't detach
       if [[ "${daemonmode}" = "default" ]]; then
@@ -1132,3 +1822,138 @@ function hadoop_secure_daemon_handler
   esac
 }
 
+## @description  Verify that ${USER} is allowed to execute the
+## @description  given subcommand.
+## @audience     public
+## @stability    stable
+## @replaceable  yes
+## @param        subcommand
+## @return       will exit on failure conditions
+function hadoop_verify_user
+{
+  local command=$1
+  local uservar="HADOOP_${command}_USER"
+
+  if [[ -n ${!uservar} ]]; then
+    if [[ ${!uservar} !=  ${USER} ]]; then
+      hadoop_error "ERROR: ${command} can only be executed by ${!uservar}."
+      exit 1
+    fi
+  fi
+}
+
+## @description  Perform the 'hadoop classpath', etc subcommand with the given
+## @description  parameters
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        [parameters]
+## @return       will print & exit with no params
+function hadoop_do_classpath_subcommand
+{
+  if [[ "$#" -gt 1 ]]; then
+    eval "$1"=org.apache.hadoop.util.Classpath
+  else
+    hadoop_finalize
+    echo "${CLASSPATH}"
+    exit 0
+  fi
+}
+
+## @description  generic shell script opton parser.  sets
+## @description  HADOOP_PARSE_COUNTER to set number the
+## @description  caller should shift
+## @audience     private
+## @stability    evolving
+## @replaceable  yes
+## @param        [parameters, typically "$@"]
+function hadoop_parse_args
+{
+  HADOOP_DAEMON_MODE="default"
+  HADOOP_PARSE_COUNTER=0
+
+  # not all of the options supported here are supported by all commands
+  # however these are:
+  hadoop_add_option "--config dir" "Hadoop config directory"
+  hadoop_add_option "--debug" "turn on shell script debug mode"
+  hadoop_add_option "--help" "usage information"
+
+  while true; do
+    hadoop_debug "hadoop_parse_args: processing $1"
+    case $1 in
+      --buildpaths)
+        # shellcheck disable=SC2034
+        HADOOP_ENABLE_BUILD_PATHS=true
+        shift
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+1))
+      ;;
+      --config)
+        shift
+        confdir=$1
+        shift
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+2))
+        if [[ -d "${confdir}" ]]; then
+          # shellcheck disable=SC2034
+          HADOOP_CONF_DIR="${confdir}"
+        elif [[ -z "${confdir}" ]]; then
+          hadoop_error "ERROR: No parameter provided for --config "
+          hadoop_exit_with_usage 1
+        else
+          hadoop_error "ERROR: Cannot find configuration directory \"${confdir}\""
+          hadoop_exit_with_usage 1
+        fi
+      ;;
+      --daemon)
+        shift
+        HADOOP_DAEMON_MODE=$1
+        shift
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+2))
+        if [[ -z "${HADOOP_DAEMON_MODE}" || \
+          ! "${HADOOP_DAEMON_MODE}" =~ ^st(art|op|atus)$ ]]; then
+          hadoop_error "ERROR: --daemon must be followed by either \"start\", \"stop\", or \"status\"."
+          hadoop_exit_with_usage 1
+        fi
+      ;;
+      --debug)
+        shift
+        # shellcheck disable=SC2034
+        HADOOP_SHELL_SCRIPT_DEBUG=true
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+1))
+      ;;
+      --help|-help|-h|help|--h|--\?|-\?|\?)
+        hadoop_exit_with_usage 0
+      ;;
+      --hostnames)
+        shift
+        # shellcheck disable=SC2034
+        HADOOP_SLAVE_NAMES="$1"
+        shift
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+2))
+      ;;
+      --hosts)
+        shift
+        hadoop_populate_slaves_file "$1"
+        shift
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+2))
+      ;;
+      --loglevel)
+        shift
+        # shellcheck disable=SC2034
+        HADOOP_LOGLEVEL="$1"
+        shift
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+2))
+      ;;
+      --slaves)
+        shift
+        # shellcheck disable=SC2034
+        HADOOP_SLAVE_MODE=true
+        ((HADOOP_PARSE_COUNTER=HADOOP_PARSE_COUNTER+1))
+      ;;
+      *)
+        break
+      ;;
+    esac
+  done
+
+  hadoop_debug "hadoop_parse: asking caller to skip ${HADOOP_PARSE_COUNTER}"
+}

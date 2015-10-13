@@ -154,6 +154,29 @@ public class TestTimelineClient {
 
   @Test
   public void testCheckRetryCount() throws Exception {
+    try {
+      YarnConfiguration conf = new YarnConfiguration();
+      conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
+      conf.setInt(YarnConfiguration.TIMELINE_SERVICE_CLIENT_MAX_RETRIES,
+        -2);
+      createTimelineClient(conf);
+      Assert.fail();
+    } catch(IllegalArgumentException e) {
+      Assert.assertTrue(e.getMessage().contains(
+          YarnConfiguration.TIMELINE_SERVICE_CLIENT_MAX_RETRIES));
+    }
+
+    try {
+      YarnConfiguration conf = new YarnConfiguration();
+      conf.setBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED, true);
+      conf.setLong(YarnConfiguration.TIMELINE_SERVICE_CLIENT_RETRY_INTERVAL_MS,
+        0);
+      createTimelineClient(conf);
+      Assert.fail();
+    } catch(IllegalArgumentException e) {
+      Assert.assertTrue(e.getMessage().contains(
+          YarnConfiguration.TIMELINE_SERVICE_CLIENT_RETRY_INTERVAL_MS));
+    }
     int newMaxRetries = 5;
     long newIntervalMs = 500;
     YarnConfiguration conf = new YarnConfiguration();
@@ -174,7 +197,7 @@ public class TestTimelineClient {
         ce.getMessage().contains("Connection retries limit exceeded"));
       // we would expect this exception here, check if the client has retried
       Assert.assertTrue("Retry filter didn't perform any retries! ", client
-        .connectionRetry.retried);
+        .connectionRetry.getRetired());
     }
   }
 
@@ -215,7 +238,10 @@ public class TestTimelineClient {
             new TimelineDelegationTokenIdentifier(
                 new Text("tester"), new Text("tester"), new Text("tester"));
         client.renewDelegationToken(
-            new Token<TimelineDelegationTokenIdentifier>(timelineDT, dtManager));
+            new Token<TimelineDelegationTokenIdentifier>(timelineDT.getBytes(),
+                dtManager.createPassword(timelineDT),
+                timelineDT.getKind(),
+                new Text("0.0.0.0:8188")));
         assertFail();
       } catch (RuntimeException ce) {
         assertException(client, ce);
@@ -227,7 +253,10 @@ public class TestTimelineClient {
             new TimelineDelegationTokenIdentifier(
                 new Text("tester"), new Text("tester"), new Text("tester"));
         client.cancelDelegationToken(
-            new Token<TimelineDelegationTokenIdentifier>(timelineDT, dtManager));
+            new Token<TimelineDelegationTokenIdentifier>(timelineDT.getBytes(),
+                dtManager.createPassword(timelineDT),
+                timelineDT.getKind(),
+                new Text("0.0.0.0:8188")));
         assertFail();
       } catch (RuntimeException ce) {
         assertException(client, ce);
@@ -249,7 +278,7 @@ public class TestTimelineClient {
             .getMessage().contains("Connection retries limit exceeded"));
     // we would expect this exception here, check if the client has retried
     Assert.assertTrue("Retry filter didn't perform any retries! ",
-        client.connectionRetry.retried);
+        client.connectionRetry.getRetired());
   }
 
   private static ClientResponse mockEntityClientResponse(
@@ -348,5 +377,9 @@ public class TestTimelineClient {
       return new TimelineDelegationTokenIdentifier();
     }
 
+    @Override
+    public synchronized byte[] createPassword(TimelineDelegationTokenIdentifier identifier) {
+      return super.createPassword(identifier);
+    }
   }
 }

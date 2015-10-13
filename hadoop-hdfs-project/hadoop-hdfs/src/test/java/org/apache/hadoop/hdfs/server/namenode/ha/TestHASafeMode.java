@@ -62,6 +62,7 @@ import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.ipc.StandbyException;
+import org.apache.hadoop.ipc.protobuf.RpcHeaderProtos.RpcResponseHeaderProto.RpcErrorCodeProto;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.After;
@@ -84,9 +85,8 @@ public class TestHASafeMode {
   private MiniDFSCluster cluster;
   
   static {
-    ((Log4JLogger)LogFactory.getLog(FSImage.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(FSImage.LOG, Level.ALL);
   }
   
   @Before
@@ -499,7 +499,7 @@ public class TestHASafeMode {
             + nodeThresh + ". In safe mode extension. "
             + "Safe mode will be turned off automatically"));
     } else {
-      int additional = total - safe;
+      int additional = (int) (total * 0.9990) - safe;
       assertTrue("Bad safemode status: '" + status + "'",
           status.startsWith(
               "Safe mode is ON. " +
@@ -775,6 +775,8 @@ public class TestHASafeMode {
       fail("StandBy should throw exception for isInSafeMode");
     } catch (IOException e) {
       if (e instanceof RemoteException) {
+        assertEquals("RPC Error code should indicate app failure.", RpcErrorCodeProto.ERROR_APPLICATION,
+            ((RemoteException) e).getErrorCode());
         IOException sbExcpetion = ((RemoteException) e).unwrapRemoteException();
         assertTrue("StandBy nn should not support isInSafeMode",
             sbExcpetion instanceof StandbyException);

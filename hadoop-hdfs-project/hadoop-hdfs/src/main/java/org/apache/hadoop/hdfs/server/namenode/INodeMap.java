@@ -18,14 +18,11 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import java.util.Iterator;
-import java.util.List;
 
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
-import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
-import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
-import org.apache.hadoop.hdfs.server.namenode.Quota.Counts;
 import org.apache.hadoop.util.GSet;
 import org.apache.hadoop.util.LightWeightGSet;
 
@@ -40,12 +37,12 @@ public class INodeMap {
   static INodeMap newInstance(INodeDirectory rootDir) {
     // Compute the map capacity by allocating 1% of total memory
     int capacity = LightWeightGSet.computeCapacity(1, "INodeMap");
-    GSet<INode, INodeWithAdditionalFields> map
-        = new LightWeightGSet<INode, INodeWithAdditionalFields>(capacity);
+    GSet<INode, INodeWithAdditionalFields> map =
+        new LightWeightGSet<>(capacity);
     map.put(rootDir);
     return new INodeMap(map);
   }
-  
+
   /** Synchronized by external lock. */
   private final GSet<INode, INodeWithAdditionalFields> map;
   
@@ -95,43 +92,40 @@ public class INodeMap {
         "", "", new FsPermission((short) 0)), 0, 0) {
       
       @Override
-      void recordModification(int latestSnapshotId)
-          throws QuotaExceededException {
+      void recordModification(int latestSnapshotId) {
       }
       
       @Override
-      public void destroyAndCollectBlocks(BlocksMapUpdateInfo collectedBlocks,
-          List<INode> removedINodes) {
+      public void destroyAndCollectBlocks(ReclaimContext reclaimContext) {
         // Nothing to do
       }
-      
+
       @Override
-      public Counts computeQuotaUsage(Counts counts, boolean useCache,
-          int lastSnapshotId) {
+      public QuotaCounts computeQuotaUsage(
+          BlockStoragePolicySuite bsps, byte blockStoragePolicyId,
+          boolean useCache, int lastSnapshotId) {
         return null;
       }
-      
+
       @Override
       public ContentSummaryComputationContext computeContentSummary(
-          ContentSummaryComputationContext summary) {
+          int snapshotId, ContentSummaryComputationContext summary) {
         return null;
       }
       
       @Override
-      public Counts cleanSubtree(int snapshotId, int priorSnapshotId,
-          BlocksMapUpdateInfo collectedBlocks, List<INode> removedINodes,
-          boolean countDiffChange) throws QuotaExceededException {
-        return null;
+      public void cleanSubtree(
+          ReclaimContext reclaimContext, int snapshotId, int priorSnapshotId) {
       }
 
       @Override
       public byte getStoragePolicyID(){
-        return BlockStoragePolicySuite.ID_UNSPECIFIED;
+        return HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
       }
 
       @Override
       public byte getLocalStoragePolicyID() {
-        return BlockStoragePolicySuite.ID_UNSPECIFIED;
+        return HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED;
       }
     };
       

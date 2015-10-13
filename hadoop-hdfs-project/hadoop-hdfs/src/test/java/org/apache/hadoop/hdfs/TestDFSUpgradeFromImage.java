@@ -18,13 +18,8 @@
 
 package org.apache.hadoop.hdfs;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
@@ -41,16 +36,22 @@ import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.inotify.Event;
+import org.apache.hadoop.hdfs.inotify.EventBatch;
 import org.apache.hadoop.hdfs.protocol.DirectoryListing;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
+import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.FSImageFormat;
 import org.apache.hadoop.hdfs.server.namenode.FSImageTestUtil;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.log4j.Logger;
 import org.junit.Test;
+
+import static org.apache.hadoop.hdfs.inotify.Event.CreateEvent;
+import static org.junit.Assert.*;
 
 /**
  * This tests data transfer protocol handling in the Datanode. It sends
@@ -75,6 +76,7 @@ public class TestDFSUpgradeFromImage {
   private static final String HADOOP023_RESERVED_IMAGE =
       "hadoop-0.23-reserved.tgz";
   private static final String HADOOP2_RESERVED_IMAGE = "hadoop-2-reserved.tgz";
+  private static final String HADOOP252_IMAGE = "hadoop-252-dfs-dir.tgz";
 
   private static class ReferenceFileInfo {
     String path;
@@ -91,6 +93,10 @@ public class TestDFSUpgradeFromImage {
     }
   }
   
+  public interface ClusterVerifier {
+    public void verifyClusterPostUpgrade(final MiniDFSCluster cluster) throws IOException;
+  }
+
   final LinkedList<ReferenceFileInfo> refList = new LinkedList<ReferenceFileInfo>();
   Iterator<ReferenceFileInfo> refIter;
   
@@ -119,7 +125,7 @@ public class TestDFSUpgradeFromImage {
       if (line.length() <= 0 || line.startsWith("#")) {
         continue;
       }
-      String[] arr = line.split("\\s+\t\\s+");
+      String[] arr = line.split("\\s+");
       if (arr.length < 1) {
         continue;
       }
@@ -288,7 +294,7 @@ public class TestDFSUpgradeFromImage {
   public void testUpgradeFromRel22Image() throws IOException {
     unpackStorage(HADOOP22_IMAGE, HADOOP_DFS_DIR_TXT);
     upgradeAndVerify(new MiniDFSCluster.Builder(upgradeConf).
-        numDataNodes(4));
+        numDataNodes(4), null);
   }
   
   /**
@@ -300,12 +306,12 @@ public class TestDFSUpgradeFromImage {
     unpackStorage(HADOOP22_IMAGE, HADOOP_DFS_DIR_TXT);
     
     // Overwrite the md5 stored in the VERSION files
-    File baseDir = new File(MiniDFSCluster.getBaseDirectory());
+    File[] nnDirs = MiniDFSCluster.getNameNodeDirectory(MiniDFSCluster.getBaseDirectory(), 0, 0);
     FSImageTestUtil.corruptVersionFile(
-        new File(baseDir, "name1/current/VERSION"),
+        new File(nnDirs[0], "current/VERSION"),
         "imageMD5Digest", "22222222222222222222222222222222");
     FSImageTestUtil.corruptVersionFile(
-        new File(baseDir, "name2/current/VERSION"),
+        new File(nnDirs[1], "current/VERSION"),
         "imageMD5Digest", "22222222222222222222222222222222");
     
     // Attach our own log appender so we can verify output
@@ -316,7 +322,7 @@ public class TestDFSUpgradeFromImage {
     // Upgrade should now fail
     try {
       upgradeAndVerify(new MiniDFSCluster.Builder(upgradeConf).
-          numDataNodes(4));
+          numDataNodes(4), null);
       fail("Upgrade did not fail with bad MD5");
     } catch (IOException ioe) {
       String msg = StringUtils.stringifyException(ioe);
@@ -573,7 +579,7 @@ public class TestDFSUpgradeFromImage {
     } while (dirList.hasMore());
   }
   
-  void upgradeAndVerify(MiniDFSCluster.Builder bld)
+  void upgradeAndVerify(MiniDFSCluster.Builder bld, ClusterVerifier verifier)
       throws IOException {
     MiniDFSCluster cluster = null;
     try {
@@ -592,6 +598,10 @@ public class TestDFSUpgradeFromImage {
       }
       recoverAllLeases(dfsClient, new Path("/"));
       verifyFileSystem(dfs);
+
+      if (verifier != null) {
+        verifier.verifyClusterPostUpgrade(cluster);
+      }
     } finally {
       if (cluster != null) { cluster.shutdown(); }
     } 
@@ -611,6 +621,102 @@ public class TestDFSUpgradeFromImage {
         "data1");
     upgradeAndVerify(new MiniDFSCluster.Builder(conf).
           numDataNodes(1).enableManagedDfsDirsRedundancy(false).
-          manageDataDfsDirs(false));
+          manageDataDfsDirs(false), null);
+  }
+
+  @Test
+  public void testPreserveEditLogs() throws Exception {
+    unpackStorage(HADOOP252_IMAGE, HADOOP_DFS_DIR_TXT);
+    /**
+     * The pre-created image has the following edits:
+     * mkdir /input; mkdir /input/dir1~5
+     * copyFromLocal randome_file_1 /input/dir1
+     * copyFromLocal randome_file_2 /input/dir2
+     * mv /input/dir1/randome_file_1 /input/dir3/randome_file_3
+     * rmdir /input/dir1
+     */
+    Configuration conf = new HdfsConfiguration();
+    conf = UpgradeUtilities.initializeStorageStateConf(1, conf);
+    MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0)
+        .format(false)
+        .manageDataDfsDirs(false)
+        .manageNameDfsDirs(false)
+        .startupOption(StartupOption.UPGRADE)
+        .build();
+    DFSInotifyEventInputStream ieis =
+        cluster.getFileSystem().getInotifyEventStream(0);
+
+    EventBatch batch;
+    Event.CreateEvent ce;
+    Event.RenameEvent re;
+
+    // mkdir /input
+    batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+    assertEquals(1, batch.getEvents().length);
+    assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.CREATE);
+    ce = (Event.CreateEvent) batch.getEvents()[0];
+    assertEquals(ce.getPath(), "/input");
+
+    // mkdir /input/dir1~5
+    for (int i = 1; i <= 5; i++) {
+      batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+      assertEquals(1, batch.getEvents().length);
+      assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.CREATE);
+      ce = (Event.CreateEvent) batch.getEvents()[0];
+      assertEquals(ce.getPath(), "/input/dir" + i);
+    }
+    // copyFromLocal randome_file_1~2 /input/dir1~2
+    for (int i = 1; i <= 2; i++) {
+      batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+      assertEquals(1, batch.getEvents().length);
+      if (batch.getEvents()[0].getEventType() != Event.EventType.CREATE) {
+        FSImage.LOG.debug("");
+      }
+      assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.CREATE);
+
+      // copyFromLocal randome_file_1 /input/dir1, CLOSE
+      batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+      assertEquals(1, batch.getEvents().length);
+      assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.CLOSE);
+
+      // copyFromLocal randome_file_1 /input/dir1, CLOSE
+      batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+      assertEquals(1, batch.getEvents().length);
+      assertTrue(batch.getEvents()[0].getEventType() ==
+          Event.EventType.RENAME);
+      re = (Event.RenameEvent) batch.getEvents()[0];
+      assertEquals(re.getDstPath(), "/input/dir" + i + "/randome_file_" + i);
+    }
+
+    // mv /input/dir1/randome_file_1 /input/dir3/randome_file_3
+    long txIDBeforeRename = batch.getTxid();
+    batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+    assertEquals(1, batch.getEvents().length);
+    assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.RENAME);
+    re = (Event.RenameEvent) batch.getEvents()[0];
+    assertEquals(re.getDstPath(), "/input/dir3/randome_file_3");
+
+
+    // rmdir /input/dir1
+    batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+    assertEquals(1, batch.getEvents().length);
+    assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.UNLINK);
+    assertEquals(((Event.UnlinkEvent) batch.getEvents()[0]).getPath(),
+        "/input/dir1");
+    long lastTxID = batch.getTxid();
+
+    // Start inotify from the tx before rename /input/dir1/randome_file_1
+    ieis = cluster.getFileSystem().getInotifyEventStream(txIDBeforeRename);
+    batch = TestDFSInotifyEventInputStream.waitForNextEvents(ieis);
+    assertEquals(1, batch.getEvents().length);
+    assertTrue(batch.getEvents()[0].getEventType() == Event.EventType.RENAME);
+    re = (Event.RenameEvent) batch.getEvents()[0];
+    assertEquals(re.getDstPath(), "/input/dir3/randome_file_3");
+
+    // Try to read beyond available edits
+    ieis = cluster.getFileSystem().getInotifyEventStream(lastTxID + 1);
+    assertNull(ieis.poll());
+
+    cluster.shutdown();
   }
 }

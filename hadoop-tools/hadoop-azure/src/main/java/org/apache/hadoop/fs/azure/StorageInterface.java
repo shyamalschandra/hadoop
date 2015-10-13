@@ -29,18 +29,18 @@ import java.util.HashMap;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 
-import com.microsoft.windowsazure.storage.CloudStorageAccount;
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.RetryPolicyFactory;
-import com.microsoft.windowsazure.storage.StorageCredentials;
-import com.microsoft.windowsazure.storage.StorageException;
-import com.microsoft.windowsazure.storage.blob.BlobListingDetails;
-import com.microsoft.windowsazure.storage.blob.BlobProperties;
-import com.microsoft.windowsazure.storage.blob.BlobRequestOptions;
-import com.microsoft.windowsazure.storage.blob.CloudBlob;
-import com.microsoft.windowsazure.storage.blob.CopyState;
-import com.microsoft.windowsazure.storage.blob.ListBlobItem;
-import com.microsoft.windowsazure.storage.blob.PageRange;
+import com.microsoft.azure.storage.CloudStorageAccount;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.RetryPolicyFactory;
+import com.microsoft.azure.storage.StorageCredentials;
+import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.blob.BlobListingDetails;
+import com.microsoft.azure.storage.blob.BlobProperties;
+import com.microsoft.azure.storage.blob.BlobRequestOptions;
+import com.microsoft.azure.storage.blob.CloudBlob;
+import com.microsoft.azure.storage.blob.CopyState;
+import com.microsoft.azure.storage.blob.ListBlobItem;
+import com.microsoft.azure.storage.blob.PageRange;
 
 /**
  * This is a very thin layer over the methods exposed by the Windows Azure
@@ -381,8 +381,12 @@ abstract class StorageInterface {
      * Copies an existing blob's contents, properties, and metadata to this instance of the <code>CloudBlob</code>
      * class, using the specified operation context.
      *
-     * @param source
-     *            A <code>java.net.URI</code> The URI of a source blob.
+     * @param sourceBlob
+     *            A <code>CloudBlob</code> object that represents the source blob to copy.
+     * @param options
+     *            A {@link BlobRequestOptions} object that specifies any additional options for the request. Specifying
+     *            <code>null</code> will use the default request options from the associated service client (
+     *            {@link CloudBlobClient}).
      * @param opContext
      *            An {@link OperationContext} object that represents the context for the current operation. This object
      *            is used to track requests to the storage service, and to provide additional runtime information about
@@ -393,8 +397,8 @@ abstract class StorageInterface {
      * @throws URISyntaxException
      *
      */
-    public abstract void startCopyFromBlob(URI source,
-        OperationContext opContext)
+    public abstract void startCopyFromBlob(CloudBlobWrapper sourceBlob,
+        BlobRequestOptions options, OperationContext opContext)
         throws StorageException, URISyntaxException;
     
     /**

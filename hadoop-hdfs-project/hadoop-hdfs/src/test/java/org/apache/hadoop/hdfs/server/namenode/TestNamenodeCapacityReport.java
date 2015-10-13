@@ -18,8 +18,8 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_KEY;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
@@ -30,15 +30,15 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.DF;
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSOutputStream;
-import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.DFSTestUtil;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManagerTestUtil;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
@@ -103,11 +103,12 @@ public class TestNamenodeCapacityReport {
             + " percentRemaining " + percentRemaining);
         
         assertTrue(configCapacity == (used + remaining + nonDFSUsed));
-        assertTrue(percentUsed == DFSUtil.getPercentUsed(used, configCapacity));
-        assertTrue(percentRemaining == DFSUtil.getPercentRemaining(remaining,
-            configCapacity));
-        assertTrue(percentBpUsed == DFSUtil.getPercentUsed(bpUsed,
-            configCapacity));
+        assertTrue(percentUsed == DFSUtilClient.getPercentUsed(used,
+                                                               configCapacity));
+        assertTrue(percentRemaining == DFSUtilClient.getPercentRemaining(
+            remaining, configCapacity));
+        assertTrue(percentBpUsed == DFSUtilClient.getPercentUsed(bpUsed,
+                                                                 configCapacity));
       }   
       
       DF df = new DF(new File(cluster.getDataDirectory()), conf);
@@ -152,10 +153,12 @@ public class TestNamenodeCapacityReport {
       assertTrue(configCapacity == (used + remaining + nonDFSUsed));
 
       // Ensure percent used is calculated based on used and present capacity
-      assertTrue(percentUsed == DFSUtil.getPercentUsed(used, configCapacity));
+      assertTrue(percentUsed == DFSUtilClient.getPercentUsed(used,
+                                                             configCapacity));
 
       // Ensure percent used is calculated based on used and present capacity
-      assertTrue(percentBpUsed == DFSUtil.getPercentUsed(bpUsed, configCapacity));
+      assertTrue(percentBpUsed == DFSUtilClient.getPercentUsed(bpUsed,
+                                                               configCapacity));
 
       // Ensure percent used is calculated based on used and present capacity
       assertTrue(percentRemaining == ((float)remaining * 100.0f)/(float)configCapacity);
@@ -170,7 +173,7 @@ public class TestNamenodeCapacityReport {
   public void testXceiverCount() throws Exception {
     Configuration conf = new HdfsConfiguration();
     // retry one time, if close fails
-    conf.setInt(DFS_CLIENT_BLOCK_WRITE_LOCATEFOLLOWINGBLOCK_RETRIES_KEY, 1);
+    conf.setInt(HdfsClientConfigKeys.BlockWrite.LOCATEFOLLOWINGBLOCK_RETRIES_KEY, 1);
     MiniDFSCluster cluster = null;
 
     final int nodes = 8;
@@ -201,10 +204,15 @@ public class TestNamenodeCapacityReport {
         DataNode dn = datanodes.get(i);
         DatanodeDescriptor dnd = dnm.getDatanode(dn.getDatanodeId());
         dn.shutdown();
-        dnd.setLastUpdate(0L);
+        DFSTestUtil.setDatanodeDead(dnd);
         BlockManagerTestUtil.checkHeartbeat(namesystem.getBlockManager());
+        //Verify decommission of dead node won't impact nodesInService metrics.
+        dnm.getDecomManager().startDecommission(dnd);
         expectedInServiceNodes--;
         assertEquals(expectedInServiceNodes, namesystem.getNumLiveDataNodes());
+        assertEquals(expectedInServiceNodes, getNumDNInService(namesystem));
+        //Verify recommission of dead node won't impact nodesInService metrics.
+        dnm.getDecomManager().stopDecommission(dnd);
         assertEquals(expectedInServiceNodes, getNumDNInService(namesystem));
       }
 
@@ -240,7 +248,7 @@ public class TestNamenodeCapacityReport {
         DatanodeDescriptor dnd =
             dnm.getDatanode(datanodes.get(i).getDatanodeId());
         expectedInServiceLoad -= dnd.getXceiverCount();
-        dnm.startDecommission(dnd);
+        dnm.getDecomManager().startDecommission(dnd);
         DataNodeTestUtils.triggerHeartbeat(datanodes.get(i));
         Thread.sleep(100);
         checkClusterHealth(nodes, namesystem, expectedTotalLoad, expectedInServiceNodes, expectedInServiceLoad);
@@ -280,7 +288,7 @@ public class TestNamenodeCapacityReport {
         dn.shutdown();
         // force it to appear dead so live count decreases
         DatanodeDescriptor dnDesc = dnm.getDatanode(dn.getDatanodeId());
-        dnDesc.setLastUpdate(0L);
+        DFSTestUtil.setDatanodeDead(dnDesc);
         BlockManagerTestUtil.checkHeartbeat(namesystem.getBlockManager());
         assertEquals(nodes-1-i, namesystem.getNumLiveDataNodes());
         // first few nodes are already out of service

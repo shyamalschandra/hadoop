@@ -19,13 +19,26 @@ package org.apache.hadoop.hdfs;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.util.concurrent.ThreadLocalRandom;
+
+import javax.management.AttributeNotFoundException;
+import javax.management.InstanceNotFoundException;
+import javax.management.MBeanException;
+import javax.management.MBeanServer;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import javax.management.ReflectionException;
+import javax.management.openmbean.CompositeDataSupport;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.RollingUpgradeAction;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
@@ -36,11 +49,15 @@ import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.namenode.FSImage;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.hdfs.server.namenode.SecondaryNameNode;
+import org.apache.hadoop.hdfs.server.namenode.TestFileTruncate;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
 import org.apache.hadoop.io.IOUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 
 /**
  * This class tests rolling upgrade.
@@ -51,7 +68,7 @@ public class TestRollingUpgrade {
   public static void runCmd(DFSAdmin dfsadmin, boolean success,
       String... args) throws  Exception {
     if (success) {
-      Assert.assertEquals(0, dfsadmin.run(args));
+      assertEquals(0, dfsadmin.run(args));
     } else {
       Assert.assertTrue(dfsadmin.run(args) != 0);
     }
@@ -62,7 +79,7 @@ public class TestRollingUpgrade {
    */
   @Test
   public void testDFSAdminRollingUpgradeCommands() throws Exception {
-    // start a cluster 
+    // start a cluster
     final Configuration conf = new HdfsConfiguration();
     MiniDFSCluster cluster = null;
     try {
@@ -81,6 +98,7 @@ public class TestRollingUpgrade {
         //illegal argument "abc" to rollingUpgrade option
         runCmd(dfsadmin, false, "-rollingUpgrade", "abc");
 
+        checkMxBeanIsNull();
         //query rolling upgrade
         runCmd(dfsadmin, true, "-rollingUpgrade");
 
@@ -91,11 +109,16 @@ public class TestRollingUpgrade {
 
         //query rolling upgrade
         runCmd(dfsadmin, true, "-rollingUpgrade", "query");
+        checkMxBean();
 
         dfs.mkdirs(bar);
-        
+
         //finalize rolling upgrade
         runCmd(dfsadmin, true, "-rollingUpgrade", "finalize");
+        // RollingUpgradeInfo should be null after finalization, both via
+        // Java API and in JMX
+        assertNull(dfs.rollingUpgrade(RollingUpgradeAction.QUERY));
+        checkMxBeanIsNull();
 
         dfs.mkdirs(baz);
 
@@ -139,7 +162,7 @@ public class TestRollingUpgrade {
     String nnDirPrefix = MiniDFSCluster.getBaseDirectory() + "/nn/";
     final File nn1Dir = new File(nnDirPrefix + "image1");
     final File nn2Dir = new File(nnDirPrefix + "image2");
-    
+
     LOG.info("nn1Dir=" + nn1Dir);
     LOG.info("nn2Dir=" + nn2Dir);
 
@@ -182,9 +205,9 @@ public class TestRollingUpgrade {
 
       final RollingUpgradeInfo info1;
       {
-        final DistributedFileSystem dfs = cluster.getFileSystem(); 
+        final DistributedFileSystem dfs = cluster.getFileSystem();
         dfs.mkdirs(foo);
-  
+
         //start rolling upgrade
         dfs.setSafeMode(SafeModeAction.SAFEMODE_ENTER);
         info1 = dfs.rollingUpgrade(RollingUpgradeAction.PREPARE);
@@ -192,8 +215,8 @@ public class TestRollingUpgrade {
         LOG.info("START\n" + info1);
 
         //query rolling upgrade
-        Assert.assertEquals(info1, dfs.rollingUpgrade(RollingUpgradeAction.QUERY));
-  
+        assertEquals(info1, dfs.rollingUpgrade(RollingUpgradeAction.QUERY));
+
         dfs.mkdirs(bar);
         cluster.shutdown();
       }
@@ -205,21 +228,21 @@ public class TestRollingUpgrade {
         .format(false)
         .manageNameDfsDirs(false)
         .build();
-      final DistributedFileSystem dfs2 = cluster2.getFileSystem(); 
-      
+      final DistributedFileSystem dfs2 = cluster2.getFileSystem();
+
       // Check that cluster2 sees the edits made on cluster1
       Assert.assertTrue(dfs2.exists(foo));
       Assert.assertTrue(dfs2.exists(bar));
       Assert.assertFalse(dfs2.exists(baz));
 
       //query rolling upgrade in cluster2
-      Assert.assertEquals(info1, dfs2.rollingUpgrade(RollingUpgradeAction.QUERY));
+      assertEquals(info1, dfs2.rollingUpgrade(RollingUpgradeAction.QUERY));
 
       dfs2.mkdirs(baz);
 
       LOG.info("RESTART cluster 2");
       cluster2.restartNameNode();
-      Assert.assertEquals(info1, dfs2.rollingUpgrade(RollingUpgradeAction.QUERY));
+      assertEquals(info1, dfs2.rollingUpgrade(RollingUpgradeAction.QUERY));
       Assert.assertTrue(dfs2.exists(foo));
       Assert.assertTrue(dfs2.exists(bar));
       Assert.assertTrue(dfs2.exists(baz));
@@ -233,7 +256,7 @@ public class TestRollingUpgrade {
 
       LOG.info("RESTART cluster 2 again");
       cluster2.restartNameNode();
-      Assert.assertEquals(info1, dfs2.rollingUpgrade(RollingUpgradeAction.QUERY));
+      assertEquals(info1, dfs2.rollingUpgrade(RollingUpgradeAction.QUERY));
       Assert.assertTrue(dfs2.exists(foo));
       Assert.assertTrue(dfs2.exists(bar));
       Assert.assertTrue(dfs2.exists(baz));
@@ -241,7 +264,7 @@ public class TestRollingUpgrade {
       //finalize rolling upgrade
       final RollingUpgradeInfo finalize = dfs2.rollingUpgrade(
           RollingUpgradeAction.FINALIZE);
-      Assert.assertNull(finalize);
+      Assert.assertTrue(finalize.isFinalized());
 
       LOG.info("RESTART cluster 2 with regular startup option");
       cluster2.getNameNodeInfos()[0].setStartOpt(StartupOption.REGULAR);
@@ -254,48 +277,81 @@ public class TestRollingUpgrade {
     }
   }
 
+  private static CompositeDataSupport getBean()
+      throws MalformedObjectNameException, MBeanException,
+      AttributeNotFoundException, InstanceNotFoundException,
+      ReflectionException {
+    MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+    ObjectName mxbeanName =
+        new ObjectName("Hadoop:service=NameNode,name=NameNodeInfo");
+    return (CompositeDataSupport)mbs.getAttribute(mxbeanName,
+        "RollingUpgradeStatus");
+  }
+
+  private static void checkMxBeanIsNull() throws Exception {
+    CompositeDataSupport ruBean = getBean();
+    assertNull(ruBean);
+  }
+
+  private static void checkMxBean() throws Exception {
+    CompositeDataSupport ruBean = getBean();
+    assertNotEquals(0l, ruBean.get("startTime"));
+    assertEquals(0l, ruBean.get("finalizeTime"));
+  }
+
   @Test
-  public void testRollback() throws IOException {
-    // start a cluster 
+  public void testRollback() throws Exception {
+    // start a cluster
     final Configuration conf = new HdfsConfiguration();
     MiniDFSCluster cluster = null;
     try {
-      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
       cluster.waitActive();
 
       final Path foo = new Path("/foo");
       final Path bar = new Path("/bar");
       cluster.getFileSystem().mkdirs(foo);
 
-      startRollingUpgrade(foo, bar, cluster);
-      cluster.getFileSystem().rollEdits();
-      cluster.getFileSystem().rollEdits();
-      rollbackRollingUpgrade(foo, bar, cluster);
+      final Path file = new Path(foo, "file");
+      final byte[] data = new byte[1024];
+      ThreadLocalRandom.current().nextBytes(data);
+      final FSDataOutputStream out = cluster.getFileSystem().create(file);
+      out.write(data, 0, data.length);
+      out.close();
 
-      startRollingUpgrade(foo, bar, cluster);
+      checkMxBeanIsNull();
+      startRollingUpgrade(foo, bar, file, data, cluster);
+      checkMxBean();
       cluster.getFileSystem().rollEdits();
       cluster.getFileSystem().rollEdits();
-      rollbackRollingUpgrade(foo, bar, cluster);
+      rollbackRollingUpgrade(foo, bar, file, data, cluster);
+      checkMxBeanIsNull();
 
-      startRollingUpgrade(foo, bar, cluster);
+      startRollingUpgrade(foo, bar, file, data, cluster);
+      cluster.getFileSystem().rollEdits();
+      cluster.getFileSystem().rollEdits();
+      rollbackRollingUpgrade(foo, bar, file, data, cluster);
+
+      startRollingUpgrade(foo, bar, file, data, cluster);
       cluster.restartNameNode();
-      rollbackRollingUpgrade(foo, bar, cluster);
+      rollbackRollingUpgrade(foo, bar, file, data, cluster);
 
-      startRollingUpgrade(foo, bar, cluster);
+      startRollingUpgrade(foo, bar, file, data, cluster);
       cluster.restartNameNode();
-      rollbackRollingUpgrade(foo, bar, cluster);
+      rollbackRollingUpgrade(foo, bar, file, data, cluster);
 
-      startRollingUpgrade(foo, bar, cluster);
-      rollbackRollingUpgrade(foo, bar, cluster);
+      startRollingUpgrade(foo, bar, file, data, cluster);
+      rollbackRollingUpgrade(foo, bar, file, data, cluster);
 
-      startRollingUpgrade(foo, bar, cluster);
-      rollbackRollingUpgrade(foo, bar, cluster);
+      startRollingUpgrade(foo, bar, file, data, cluster);
+      rollbackRollingUpgrade(foo, bar, file, data, cluster);
     } finally {
       if(cluster != null) cluster.shutdown();
     }
   }
-  
+
   private static void startRollingUpgrade(Path foo, Path bar,
+      Path file, byte[] data,
       MiniDFSCluster cluster) throws IOException {
     final DistributedFileSystem dfs = cluster.getFileSystem();
 
@@ -305,18 +361,28 @@ public class TestRollingUpgrade {
     dfs.setSafeMode(SafeModeAction.SAFEMODE_LEAVE);
 
     dfs.mkdirs(bar);
-    
     Assert.assertTrue(dfs.exists(foo));
     Assert.assertTrue(dfs.exists(bar));
+
+    //truncate a file
+    final int newLength = ThreadLocalRandom.current().nextInt(data.length - 1)
+        + 1;
+    dfs.truncate(file, newLength);
+    TestFileTruncate.checkBlockRecovery(file, dfs);
+    AppendTestUtil.checkFullFile(dfs, file, newLength, data);
   }
-  
+
   private static void rollbackRollingUpgrade(Path foo, Path bar,
+      Path file, byte[] data,
       MiniDFSCluster cluster) throws IOException {
+    final DataNodeProperties dnprop = cluster.stopDataNode(0);
     cluster.restartNameNode("-rollingUpgrade", "rollback");
+    cluster.restartDataNode(dnprop, true);
 
     final DistributedFileSystem dfs = cluster.getFileSystem();
     Assert.assertTrue(dfs.exists(foo));
     Assert.assertFalse(dfs.exists(bar));
+    AppendTestUtil.checkFullFile(dfs, file, data.length, data);
   }
 
   @Test
@@ -333,39 +399,50 @@ public class TestRollingUpgrade {
       // check the datanode
       final String dnAddr = dn.getDatanodeId().getIpcAddr(false);
       final String[] args1 = {"-getDatanodeInfo", dnAddr};
-      Assert.assertEquals(0, dfsadmin.run(args1));
+      runCmd(dfsadmin, true, args1);
 
       // issue shutdown to the datanode.
       final String[] args2 = {"-shutdownDatanode", dnAddr, "upgrade" };
-      Assert.assertEquals(0, dfsadmin.run(args2));
+      runCmd(dfsadmin, true, args2);
 
       // the datanode should be down.
       Thread.sleep(2000);
       Assert.assertFalse("DataNode should exit", dn.isDatanodeUp());
 
       // ping should fail.
-      Assert.assertEquals(-1, dfsadmin.run(args1));
+      assertEquals(-1, dfsadmin.run(args1));
     } finally {
       if (cluster != null) cluster.shutdown();
     }
   }
 
-  @Test (timeout = 300000)
+  @Test(timeout = 300000)
   public void testFinalize() throws Exception {
+    testFinalize(2);
+  }
+
+  @Test(timeout = 300000)
+  public void testFinalizeWithMultipleNN() throws Exception {
+    testFinalize(3);
+  }
+
+  private void testFinalize(int nnCount) throws Exception {
     final Configuration conf = new HdfsConfiguration();
     MiniQJMHACluster cluster = null;
     final Path foo = new Path("/foo");
     final Path bar = new Path("/bar");
 
     try {
-      cluster = new MiniQJMHACluster.Builder(conf).build();
+      cluster = new MiniQJMHACluster.Builder(conf).setNumNameNodes(nnCount).build();
       MiniDFSCluster dfsCluster = cluster.getDfsCluster();
       dfsCluster.waitActive();
 
-      // let NN1 tail editlog every 1s
-      dfsCluster.getConfiguration(1).setInt(
-          DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_KEY, 1);
-      dfsCluster.restartNameNode(1);
+      // let other NN tail editlog every 1s
+      for(int i=1; i < nnCount; i++) {
+        dfsCluster.getConfiguration(i).setInt(
+            DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_KEY, 1);
+      }
+      dfsCluster.restartNameNodes();
 
       dfsCluster.transitionToActive(0);
       DistributedFileSystem dfs = dfsCluster.getFileSystem(0);
@@ -385,7 +462,7 @@ public class TestRollingUpgrade {
       Assert.assertTrue(fsimage.hasRollbackFSImage());
 
       info = dfs.rollingUpgrade(RollingUpgradeAction.FINALIZE);
-      Assert.assertNull(info);
+      Assert.assertTrue(info.isFinalized());
       Assert.assertTrue(dfs.exists(foo));
 
       // Once finalized, there should be no more fsimage for rollbacks.
@@ -403,17 +480,29 @@ public class TestRollingUpgrade {
 
   @Test (timeout = 300000)
   public void testQuery() throws Exception {
+    testQuery(2);
+  }
+
+  @Test (timeout = 300000)
+  public void testQueryWithMultipleNN() throws Exception {
+    testQuery(3);
+  }
+
+  private void testQuery(int nnCount) throws Exception{
     final Configuration conf = new Configuration();
     MiniQJMHACluster cluster = null;
     try {
-      cluster = new MiniQJMHACluster.Builder(conf).build();
+      cluster = new MiniQJMHACluster.Builder(conf).setNumNameNodes(nnCount).build();
       MiniDFSCluster dfsCluster = cluster.getDfsCluster();
       dfsCluster.waitActive();
 
       dfsCluster.transitionToActive(0);
       DistributedFileSystem dfs = dfsCluster.getFileSystem(0);
 
-      dfsCluster.shutdownNameNode(1);
+      // shutdown other NNs
+      for (int i = 1; i < nnCount; i++) {
+        dfsCluster.shutdownNameNode(i);
+      }
 
       // start rolling upgrade
       RollingUpgradeInfo info = dfs
@@ -423,13 +512,16 @@ public class TestRollingUpgrade {
       info = dfs.rollingUpgrade(RollingUpgradeAction.QUERY);
       Assert.assertFalse(info.createdRollbackImages());
 
-      dfsCluster.restartNameNode(1);
-
+      // restart other NNs
+      for (int i = 1; i < nnCount; i++) {
+        dfsCluster.restartNameNode(i);
+      }
+      // check that one of the other NNs has created the rollback image and uploaded it
       queryForPreparation(dfs);
 
       // The NN should have a copy of the fsimage in case of rollbacks.
       Assert.assertTrue(dfsCluster.getNamesystem(0).getFSImage()
-          .hasRollbackFSImage());
+              .hasRollbackFSImage());
     } finally {
       if (cluster != null) {
         cluster.shutdown();
@@ -465,6 +557,15 @@ public class TestRollingUpgrade {
 
   @Test(timeout = 300000)
   public void testCheckpoint() throws IOException, InterruptedException {
+    testCheckpoint(2);
+  }
+
+  @Test(timeout = 300000)
+  public void testCheckpointWithMultipleNN() throws IOException, InterruptedException {
+    testCheckpoint(3);
+  }
+
+  public void testCheckpoint(int nnCount) throws IOException, InterruptedException {
     final Configuration conf = new Configuration();
     conf.setInt(DFSConfigKeys.DFS_HA_TAILEDITS_PERIOD_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_CHECKPOINT_PERIOD_KEY, 1);
@@ -473,7 +574,7 @@ public class TestRollingUpgrade {
     final Path foo = new Path("/foo");
 
     try {
-      cluster = new MiniQJMHACluster.Builder(conf).build();
+      cluster = new MiniQJMHACluster.Builder(conf).setNumNameNodes(nnCount).build();
       MiniDFSCluster dfsCluster = cluster.getDfsCluster();
       dfsCluster.waitActive();
 
@@ -491,22 +592,31 @@ public class TestRollingUpgrade {
       long txid = dfs.rollEdits();
       Assert.assertTrue(txid > 0);
 
-      int retries = 0;
-      while (++retries < 5) {
-        NNStorage storage = dfsCluster.getNamesystem(1).getFSImage()
-            .getStorage();
-        if (storage.getFsImageName(txid - 1) != null) {
-          return;
-        }
-        Thread.sleep(1000);
+      for(int i=1; i< nnCount; i++) {
+        verifyNNCheckpoint(dfsCluster, txid, i);
       }
-      Assert.fail("new checkpoint does not exist");
 
     } finally {
       if (cluster != null) {
         cluster.shutdown();
       }
     }
+  }
+
+  /**
+   * Verify that the namenode at the given index has an FSImage with a TxId up to txid-1
+   */
+  private void verifyNNCheckpoint(MiniDFSCluster dfsCluster, long txid, int nnIndex) throws InterruptedException {
+    int retries = 0;
+    while (++retries < 5) {
+      NNStorage storage = dfsCluster.getNamesystem(nnIndex).getFSImage()
+              .getStorage();
+      if (storage.getFsImageName(txid - 1) != null) {
+        return;
+      }
+      Thread.sleep(1000);
+    }
+    Assert.fail("new checkpoint does not exist");
   }
 
   static void queryForPreparation(DistributedFileSystem dfs) throws IOException,

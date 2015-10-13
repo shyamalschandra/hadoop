@@ -39,6 +39,8 @@ public interface CapacitySchedulerContext {
 
   Resource getMaximumResourceCapability();
 
+  Resource getMaximumResourceCapability(String queueName);
+
   RMContainerTokenSecretManager getContainerTokenSecretManager();
   
   int getNumClusterNodes();
@@ -52,11 +54,11 @@ public interface CapacitySchedulerContext {
    */
   Configuration getConf();
 
-  Comparator<FiCaSchedulerApp> getApplicationComparator();
-
   ResourceCalculator getResourceCalculator();
 
-  Comparator<CSQueue> getQueueComparator();
+  Comparator<CSQueue> getNonPartitionedQueueComparator();
+  
+  PartitionedQueueComparator getPartitionedQueueComparator();
   
   FiCaSchedulerNode getNode(NodeId nodeId);
 }

@@ -24,6 +24,7 @@ import java.util.regex.Pattern;
 import javax.servlet.*;
 import javax.servlet.http.*;
 
+import com.google.common.base.Charsets;
 import org.apache.commons.logging.*;
 import org.apache.commons.logging.impl.*;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -37,8 +38,8 @@ import org.apache.hadoop.util.ServletUtil;
 @InterfaceStability.Evolving
 public class LogLevel {
   public static final String USAGES = "\nUsage: General options are:\n"
-      + "\t[-getlevel <host:httpPort> <name>]\n"
-      + "\t[-setlevel <host:httpPort> <name> <level>]\n";
+      + "\t[-getlevel <host:httpPort> <classname>]\n"
+      + "\t[-setlevel <host:httpPort> <classname> <level>]\n";
 
   /**
    * A command line implementation
@@ -66,7 +67,7 @@ public class LogLevel {
       connection.connect();
 
       BufferedReader in = new BufferedReader(new InputStreamReader(
-          connection.getInputStream()));
+          connection.getInputStream(), Charsets.UTF_8));
       for(String line; (line = in.readLine()) != null; )
         if (line.startsWith(MARKER)) {
           System.out.println(TAG.matcher(line).replaceAll(""));
@@ -105,7 +106,7 @@ public class LogLevel {
       if (logName != null) {
         out.println("<br /><hr /><h3>Results</h3>");
         out.println(MARKER
-            + "Submitted Log Name: <b>" + logName + "</b><br />");
+            + "Submitted Class Name: <b>" + logName + "</b><br />");
 
         Log log = LogFactory.getLog(logName);
         out.println(MARKER
@@ -130,10 +131,10 @@ public class LogLevel {
     }
 
     static final String FORMS = "\n<br /><hr /><h3>Get / Set</h3>"
-        + "\n<form>Log: <input type='text' size='50' name='log' /> "
+        + "\n<form>Class Name: <input type='text' size='50' name='log' /> "
         + "<input type='submit' value='Get Log Level' />"
         + "</form>"
-        + "\n<form>Log: <input type='text' size='50' name='log' /> "
+        + "\n<form>Class Name: <input type='text' size='50' name='log' /> "
         + "Level: <input type='text' name='level' /> "
         + "<input type='submit' value='Set Log Level' />"
         + "</form>";

@@ -19,6 +19,7 @@
 package org.apache.hadoop.yarn.lib;
 
 import java.io.IOException;
+import java.nio.charset.Charset;
 import java.util.List;
 
 import org.apache.zookeeper.CreateMode;
@@ -39,7 +40,7 @@ public class ZKClient {
    * the zookeeper client library to 
    * talk to zookeeper 
    * @param string the host
-   * @throws throws IOException
+   * @throws IOException
    */
   public ZKClient(String string) throws IOException {
     zkClient = new ZooKeeper(string, 30000, new ZKWatcher());
@@ -55,8 +56,8 @@ public class ZKClient {
   public void registerService(String path, String data) throws
     IOException, InterruptedException {
     try {
-      zkClient.create(path, data.getBytes(), ZooDefs.Ids.OPEN_ACL_UNSAFE, 
-          CreateMode.EPHEMERAL);
+      zkClient.create(path, data.getBytes(Charset.forName("UTF-8")),
+          ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
     } catch(KeeperException ke) {
       throw new IOException(ke);
     }
@@ -109,7 +110,7 @@ public class ZKClient {
     try {
       Stat stat = new Stat();
       byte[] byteData = zkClient.getData(path, false, stat);
-      data = new String(byteData);
+      data = new String(byteData, Charset.forName("UTF-8"));
     } catch(KeeperException ke) {
       throw new IOException(ke);
     }

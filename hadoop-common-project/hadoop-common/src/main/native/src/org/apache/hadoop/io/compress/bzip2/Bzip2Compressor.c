@@ -25,7 +25,6 @@
 #include "org_apache_hadoop_io_compress_bzip2.h"
 #include "org_apache_hadoop_io_compress_bzip2_Bzip2Compressor.h"
 
-static jfieldID Bzip2Compressor_clazz;
 static jfieldID Bzip2Compressor_stream;
 static jfieldID Bzip2Compressor_uncompressedDirectBuf;
 static jfieldID Bzip2Compressor_uncompressedDirectBufOff;
@@ -43,15 +42,25 @@ JNIEXPORT void JNICALL
 Java_org_apache_hadoop_io_compress_bzip2_Bzip2Compressor_initIDs(
                                  JNIEnv *env, jclass class, jstring libname)
 {
-    const char* bzlib_name = (*env)->GetStringUTFChars(env, libname, NULL);
-    if (strcmp(bzlib_name, "system-native") == 0)
-      bzlib_name = HADOOP_BZIP2_LIBRARY;
+    const char *bzlib_name = NULL;
+    const char *java_lib_name = (*env)->GetStringUTFChars(env, libname, NULL);
+    if (java_lib_name == NULL) {
+        // Java code will get OutOfMemoryException thrown by GetStringUTFChars
+        goto cleanup;
+    }
+
+    if (strcmp(java_lib_name, "system-native") == 0) {
+        bzlib_name = HADOOP_BZIP2_LIBRARY;
+    } else {
+        bzlib_name = java_lib_name;
+    }
+
     // Load the native library.
     void *libbz2 = dlopen(bzlib_name, RTLD_LAZY | RTLD_GLOBAL);
     if (!libbz2) {
         THROW(env, "java/lang/UnsatisfiedLinkError",
               "Cannot load bzip2 native library");
-        return;
+        goto cleanup;
     }
 
     // Locate the requisite symbols from libbz2.so.
@@ -64,8 +73,6 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Compressor_initIDs(
                         "BZ2_bzCompressEnd");
 
     // Initialize the requisite fieldIds.
-    Bzip2Compressor_clazz = (*env)->GetStaticFieldID(env, class, "clazz", 
-                                                     "Ljava/lang/Class;");
     Bzip2Compressor_stream = (*env)->GetFieldID(env, class, "stream", "J");
     Bzip2Compressor_finish = (*env)->GetFieldID(env, class, "finish", "Z");
     Bzip2Compressor_finished = (*env)->GetFieldID(env, class, "finished", "Z");
@@ -83,6 +90,11 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Compressor_initIDs(
                                                      "Ljava/nio/Buffer;");
     Bzip2Compressor_directBufferSize = (*env)->GetFieldID(env, class, 
                                                   "directBufferSize", "I");
+ cleanup:
+    if(java_lib_name != NULL) {
+        (*env)->ReleaseStringUTFChars(env,libname,java_lib_name);
+        java_lib_name = NULL;
+    }
 }
 
 JNIEXPORT jlong JNICALL
@@ -140,9 +152,7 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Compressor_deflateBytesDirect(
         return (jint)0;
     } 
 
-    jobject clazz = (*env)->GetStaticObjectField(env, this, 
-                                                 Bzip2Compressor_clazz);
-    jobject uncompressed_direct_buf = (*env)->GetObjectField(env, this, 
+    jobject uncompressed_direct_buf = (*env)->GetObjectField(env, this,
                                      Bzip2Compressor_uncompressedDirectBuf);
     jint uncompressed_direct_buf_off = (*env)->GetIntField(env, this, 
                                    Bzip2Compressor_uncompressedDirectBufOff);
@@ -158,12 +168,10 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Compressor_deflateBytesDirect(
                                               Bzip2Compressor_finish);
 
     // Get the input and output direct buffers.
-    LOCK_CLASS(env, clazz, "Bzip2Compressor");
     char* uncompressed_bytes = (*env)->GetDirectBufferAddress(env, 
                                                 uncompressed_direct_buf);
     char* compressed_bytes = (*env)->GetDirectBufferAddress(env, 
                                                 compressed_direct_buf);
-    UNLOCK_CLASS(env, clazz, "Bzip2Compressor");
 
     if (!uncompressed_bytes || !compressed_bytes) {
         return (jint)0;
@@ -234,9 +242,10 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Compressor_end(
 {
     if (dlsym_BZ2_bzCompressEnd(BZSTREAM(stream)) != BZ_OK) {
         THROW(env, "java/lang/InternalError", NULL);
-    } else {
-        free(BZSTREAM(stream));
     }
+
+    free(BZSTREAM(stream));
+
 }
 
 JNIEXPORT jstring JNICALL

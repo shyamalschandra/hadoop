@@ -73,6 +73,7 @@ message NameSystemSection {
   optional uint64 lastAllocatedBlockId = 5;
   optional uint64 transactionId = 6;
   optional uint64 rollingUpgradeStartTime = 7;
+  optional uint64 lastAllocatedStripedBlockId = 8;
 }
 
 /**
@@ -139,6 +140,16 @@ message INodeSection {
     optional AclFeatureProto acl = 8;
     optional XAttrFeatureProto xAttrs = 9;
     optional uint32 storagePolicyID = 10;
+    optional bool isStriped = 11;
+  }
+
+  message QuotaByStorageTypeEntryProto {
+    required StorageTypeProto storageType = 1;
+    required uint64 quota = 2;
+  }
+
+  message QuotaByStorageTypeFeatureProto {
+    repeated QuotaByStorageTypeEntryProto quotas = 1;
   }
 
   message INodeDirectory {
@@ -150,6 +161,7 @@ message INodeSection {
     optional fixed64 permission = 4;
     optional AclFeatureProto acl = 5;
     optional XAttrFeatureProto xAttrs = 6;
+    optional QuotaByStorageTypeFeatureProto typeQuotas = 7;
   }
 
   message INodeSymlink {
@@ -270,6 +282,7 @@ message SnapshotDiffSection {
     optional uint64 fileSize = 2;
     optional bytes name = 3;
     optional INodeSection.INodeFile snapshotCopy = 4;
+    repeated BlockProto blocks = 5;
   }
 
   message DiffEntry {

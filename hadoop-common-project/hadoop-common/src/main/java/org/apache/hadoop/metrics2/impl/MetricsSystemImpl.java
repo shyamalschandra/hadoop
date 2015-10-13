@@ -61,6 +61,7 @@ import org.apache.hadoop.metrics2.lib.MetricsRegistry;
 import org.apache.hadoop.metrics2.lib.MetricsSourceBuilder;
 import org.apache.hadoop.metrics2.lib.MutableStat;
 import org.apache.hadoop.metrics2.util.MBeans;
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
 
 /**
@@ -104,7 +105,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
   private Map<String, MetricsConfig> sourceConfigs, sinkConfigs;
   private boolean monitoring = false;
   private Timer timer;
-  private int period; // seconds
+  private long period; // milliseconds
   private long logicalTime; // number of timer invocations * period
   private ObjectName mbeanName;
   private boolean publishSelfMetrics = true;
@@ -358,7 +359,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
       return;
     }
     logicalTime = 0;
-    long millis = period * 1000;
+    long millis = period;
     timer = new Timer("Timer for '"+ prefix +"' metrics system", true);
     timer.scheduleAtFixedRate(new TimerTask() {
           @Override
@@ -366,11 +367,11 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
             try {
               onTimerEvent();
             } catch (Exception e) {
-              LOG.warn(e);
+              LOG.warn("Error invoking metrics timer", e);
             }
           }
         }, millis, millis);
-    LOG.info("Scheduled snapshot period at "+ period +" second(s).");
+    LOG.info("Scheduled snapshot period at "+ (period/1000) +" second(s).");
   }
 
   synchronized void onTimerEvent() {
@@ -384,7 +385,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
    * Requests an immediate publish of all metrics from sources to sinks.
    */
   @Override
-  public void publishMetricsNow() {
+  public synchronized void publishMetricsNow() {
     if (sinks.size() > 0) {
       publishMetrics(sampleMetrics(), true);
     }    
@@ -394,7 +395,8 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
    * Sample all the sources for a snapshot of metrics/tags
    * @return  the metrics buffer containing the snapshot
    */
-  synchronized MetricsBuffer sampleMetrics() {
+  @VisibleForTesting
+  public synchronized MetricsBuffer sampleMetrics() {
     collector.clear();
     MetricsBufferBuilder bufferBuilder = new MetricsBufferBuilder();
 
@@ -484,12 +486,15 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
 
   private synchronized void configureSinks() {
     sinkConfigs = config.getInstanceConfigs(SINK_KEY);
-    int confPeriod = 0;
+    long confPeriodMillis = 0;
     for (Entry<String, MetricsConfig> entry : sinkConfigs.entrySet()) {
       MetricsConfig conf = entry.getValue();
       int sinkPeriod = conf.getInt(PERIOD_KEY, PERIOD_DEFAULT);
-      confPeriod = confPeriod == 0 ? sinkPeriod
-                                   : ArithmeticUtils.gcd(confPeriod, sinkPeriod);
+      // Support configuring periodMillis for testing.
+      long sinkPeriodMillis =
+          conf.getLong(PERIOD_MILLIS_KEY, sinkPeriod * 1000);
+      confPeriodMillis = confPeriodMillis == 0 ? sinkPeriodMillis
+          : ArithmeticUtils.gcd(confPeriodMillis, sinkPeriodMillis);
       String clsName = conf.getClassName("");
       if (clsName == null) continue;  // sink can be registered later on
       String sinkName = entry.getKey();
@@ -502,8 +507,9 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
         LOG.warn("Error creating sink '"+ sinkName +"'", e);
       }
     }
-    period = confPeriod > 0 ? confPeriod
-                            : config.getInt(PERIOD_KEY, PERIOD_DEFAULT);
+    long periodSec = config.getInt(PERIOD_KEY, PERIOD_DEFAULT);
+    period = confPeriodMillis > 0 ? confPeriodMillis
+        : config.getLong(PERIOD_MILLIS_KEY, periodSec * 1000);
   }
 
   static MetricsSinkAdapter newSink(String name, String desc, MetricsSink sink,
@@ -616,7 +622,7 @@ public class MetricsSystemImpl extends MetricsSystem implements MetricsSource {
     LOG.debug("from environment variable: "+ System.getenv(MS_INIT_MODE_KEY));
     String m = System.getProperty(MS_INIT_MODE_KEY);
     String m2 = m == null ? System.getenv(MS_INIT_MODE_KEY) : m;
-    return InitMode.valueOf((m2 == null ? InitMode.NORMAL.name() : m2)
-                            .toUpperCase(Locale.US));
+    return InitMode.valueOf(
+        StringUtils.toUpperCase((m2 == null ? InitMode.NORMAL.name() : m2)));
   }
 }

@@ -18,8 +18,11 @@
 
 package org.apache.hadoop.yarn.server.webproxy;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.ObjectInputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.InetAddress;
@@ -31,47 +34,75 @@ import java.util.EnumSet;
 import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+import javax.servlet.ServletException;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.ws.rs.core.UriBuilder;
 
-import org.apache.commons.httpclient.Header;
-import org.apache.commons.httpclient.HostConfiguration;
-import org.apache.commons.httpclient.HttpClient;
-import org.apache.commons.httpclient.HttpMethod;
-import org.apache.commons.httpclient.cookie.CookiePolicy;
-import org.apache.commons.httpclient.methods.GetMethod;
-import org.apache.commons.httpclient.params.HttpClientParams;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.server.webproxy.AppReportFetcher.AppReportSource;
+import org.apache.hadoop.yarn.server.webproxy.AppReportFetcher.FetchedAppReport;
 import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.util.StringHelper;
 import org.apache.hadoop.yarn.util.TrackingUriPlugin;
 import org.apache.hadoop.yarn.webapp.MimeType;
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
+import org.apache.http.Header;
+import org.apache.http.HttpResponse;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPut;
+import org.apache.http.client.methods.HttpRequestBase;
+import org.apache.http.client.params.ClientPNames;
+import org.apache.http.client.params.CookiePolicy;
+import org.apache.http.client.utils.URLEncodedUtils;
+import org.apache.http.conn.params.ConnRoutePNames;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class WebAppProxyServlet extends HttpServlet {
   private static final long serialVersionUID = 1L;
-  private static final Log LOG = LogFactory.getLog(WebAppProxyServlet.class);
-  private static final HashSet<String> passThroughHeaders = 
-    new HashSet<String>(Arrays.asList("User-Agent", "Accept", "Accept-Encoding",
-        "Accept-Language", "Accept-Charset"));
-  
+  private static final Logger LOG = LoggerFactory.getLogger(
+      WebAppProxyServlet.class);
+  private static final Set<String> passThroughHeaders = 
+    new HashSet<>(Arrays.asList(
+        "User-Agent",
+        "Accept",
+        "Accept-Encoding",
+        "Accept-Language",
+        "Accept-Charset",
+        "Content-Type",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers"));
+
   public static final String PROXY_USER_COOKIE_NAME = "proxy-user";
 
-  private final List<TrackingUriPlugin> trackingUriPlugins;
+  private transient List<TrackingUriPlugin> trackingUriPlugins;
   private final String rmAppPageUrlBase;
-  private final transient YarnConfiguration conf;
+  private final String ahsAppPageUrlBase;
+  private transient YarnConfiguration conf;
 
+  /**
+   * HTTP methods.
+   */
+  private enum HTTP { GET, POST, HEAD, PUT, DELETE };
+
+  /**
+   * Empty Hamlet class.
+   */
   private static class _ implements Hamlet._ {
     //Empty
   }
@@ -82,15 +113,14 @@ public class WebAppProxyServlet extends HttpServlet {
     }
   
     public HTML<WebAppProxyServlet._> html() {
-      return new HTML<WebAppProxyServlet._>("html", null, EnumSet.of(EOpt.ENDTAG));
+      return new HTML<>("html", null, EnumSet.of(EOpt.ENDTAG));
     }
   }
 
   /**
    * Default constructor
    */
-  public WebAppProxyServlet()
-  {
+  public WebAppProxyServlet() {
     super();
     conf = new YarnConfiguration();
     this.trackingUriPlugins =
@@ -98,6 +128,9 @@ public class WebAppProxyServlet extends HttpServlet {
             TrackingUriPlugin.class);
     this.rmAppPageUrlBase = StringHelper.pjoin(
         WebAppUtils.getResolvedRMWebAppURLWithScheme(conf), "cluster", "app");
+    this.ahsAppPageUrlBase = StringHelper.pjoin(
+        WebAppUtils.getHttpSchemePrefix(conf) + WebAppUtils
+        .getAHSWebAppURLWithoutScheme(conf), "applicationhistory", "apps");
   }
 
   /**
@@ -108,12 +141,7 @@ public class WebAppProxyServlet extends HttpServlet {
    */
   private static void notFound(HttpServletResponse resp, String message) 
     throws IOException {
-    resp.setStatus(HttpServletResponse.SC_NOT_FOUND);
-    resp.setContentType(MimeType.HTML);
-    Page p = new Page(resp.getWriter());
-    p.html().
-      h1(message).
-    _();
+    ProxyUtils.notFound(resp, message);
   }
   
   /**
@@ -132,7 +160,8 @@ public class WebAppProxyServlet extends HttpServlet {
     resp.setContentType(MimeType.HTML);
     Page p = new Page(resp.getWriter());
     p.html().
-      h1("WARNING: The following page may not be safe!").h3().
+      h1("WARNING: The following page may not be safe!").
+      h3().
       _("click ").a(link, "here").
       _(" to continue to an Application Master web interface owned by ", user).
       _().
@@ -145,59 +174,84 @@ public class WebAppProxyServlet extends HttpServlet {
    * @param resp the http response
    * @param link the link to download
    * @param c the cookie to set if any
+   * @param proxyHost the proxy host
+   * @param method the http method
    * @throws IOException on any error.
    */
-  private static void proxyLink(HttpServletRequest req, 
-      HttpServletResponse resp, URI link, Cookie c, String proxyHost)
-      throws IOException {
-    org.apache.commons.httpclient.URI uri = 
-      new org.apache.commons.httpclient.URI(link.toString(), false);
-    HttpClientParams params = new HttpClientParams();
-    params.setCookiePolicy(CookiePolicy.BROWSER_COMPATIBILITY);
-    params.setBooleanParameter(HttpClientParams.ALLOW_CIRCULAR_REDIRECTS, true);
-    HttpClient client = new HttpClient(params);
+  private static void proxyLink(final HttpServletRequest req,
+      final HttpServletResponse resp, final URI link, final Cookie c,
+      final String proxyHost, final HTTP method) throws IOException {
+    DefaultHttpClient client = new DefaultHttpClient();
+    client
+        .getParams()
+        .setParameter(ClientPNames.COOKIE_POLICY,
+            CookiePolicy.BROWSER_COMPATIBILITY)
+        .setBooleanParameter(ClientPNames.ALLOW_CIRCULAR_REDIRECTS, true);
     // Make sure we send the request from the proxy address in the config
     // since that is what the AM filter checks against. IP aliasing or
     // similar could cause issues otherwise.
-    HostConfiguration config = new HostConfiguration();
     InetAddress localAddress = InetAddress.getByName(proxyHost);
     if (LOG.isDebugEnabled()) {
-      LOG.debug("local InetAddress for proxy host: " + localAddress.toString());
+      LOG.debug("local InetAddress for proxy host: {}", localAddress);
     }
-    config.setLocalAddress(localAddress);
-    HttpMethod method = new GetMethod(uri.getEscapedURI());
-    method.setRequestHeader("Connection","close");
+    client.getParams()
+        .setParameter(ConnRoutePNames.LOCAL_ADDRESS, localAddress);
+
+    HttpRequestBase base = null;
+    if (method.equals(HTTP.GET)) {
+      base = new HttpGet(link);
+    } else if (method.equals(HTTP.PUT)) {
+      base = new HttpPut(link);
+
+      StringBuilder sb = new StringBuilder();
+      BufferedReader reader =
+          new BufferedReader(
+              new InputStreamReader(req.getInputStream(), "UTF-8"));
+      String line;
+      while ((line = reader.readLine()) != null) {
+        sb.append(line);
+      }
+
+      ((HttpPut) base).setEntity(new StringEntity(sb.toString()));
+    } else {
+      resp.setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+      return;
+    }
+
     @SuppressWarnings("unchecked")
     Enumeration<String> names = req.getHeaderNames();
     while(names.hasMoreElements()) {
       String name = names.nextElement();
       if(passThroughHeaders.contains(name)) {
         String value = req.getHeader(name);
-        LOG.debug("REQ HEADER: "+name+" : "+value);
-        method.setRequestHeader(name, value);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("REQ HEADER: {} : {}", name, value);
+        }
+        base.setHeader(name, value);
       }
     }
 
     String user = req.getRemoteUser();
-    if(user != null && !user.isEmpty()) {
-      method.setRequestHeader("Cookie",PROXY_USER_COOKIE_NAME+"="+
-          URLEncoder.encode(user, "ASCII"));
+    if (user != null && !user.isEmpty()) {
+      base.setHeader("Cookie",
+          PROXY_USER_COOKIE_NAME + "=" + URLEncoder.encode(user, "ASCII"));
     }
     OutputStream out = resp.getOutputStream();
     try {
-      resp.setStatus(client.executeMethod(config, method));
-      for(Header header : method.getResponseHeaders()) {
+      HttpResponse httpResp = client.execute(base);
+      resp.setStatus(httpResp.getStatusLine().getStatusCode());
+      for (Header header : httpResp.getAllHeaders()) {
         resp.setHeader(header.getName(), header.getValue());
       }
-      if(c != null) {
+      if (c != null) {
         resp.addCookie(c);
       }
-      InputStream in = method.getResponseBodyAsStream();
-      if(in != null) {
+      InputStream in = httpResp.getEntity().getContent();
+      if (in != null) {
         IOUtils.copyBytes(in, out, 4096, true);
       }
     } finally {
-      method.releaseConnection();
+      base.releaseConnection();
     }
   }
   
@@ -215,11 +269,10 @@ public class WebAppProxyServlet extends HttpServlet {
   private boolean isSecurityEnabled() {
     Boolean b = (Boolean) getServletContext()
         .getAttribute(WebAppProxy.IS_SECURITY_ENABLED_ATTRIBUTE);
-    if(b != null) return b;
-    return false;
+    return b != null ? b : false;
   }
   
-  private ApplicationReport getApplicationReport(ApplicationId id)
+  private FetchedAppReport getApplicationReport(ApplicationId id)
       throws IOException, YarnException {
     return ((AppReportFetcher) getServletContext()
         .getAttribute(WebAppProxy.FETCHER_ATTRIBUTE)).getApplicationReport(id);
@@ -231,21 +284,43 @@ public class WebAppProxyServlet extends HttpServlet {
   }
   
   @Override
-  protected void doGet(HttpServletRequest req, HttpServletResponse resp) 
-  throws IOException{
+  protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+      throws ServletException, IOException {
+    methodAction(req, resp, HTTP.GET);
+  }
+
+  @Override
+  protected final void doPut(final HttpServletRequest req,
+      final HttpServletResponse resp) throws ServletException, IOException {
+    methodAction(req, resp, HTTP.PUT);
+  }
+
+  /**
+   * The action against the HTTP method.
+   * @param req the HttpServletRequest
+   * @param resp the HttpServletResponse
+   * @param method the HTTP method
+   * @throws ServletException
+   * @throws IOException
+   */
+  private void methodAction(final HttpServletRequest req,
+      final HttpServletResponse resp,
+      final HTTP method) throws ServletException, IOException {
     try {
       String userApprovedParamS = 
         req.getParameter(ProxyUriUtils.PROXY_APPROVAL_PARAM);
       boolean userWasWarned = false;
-      boolean userApproved = 
-        (userApprovedParamS != null && Boolean.valueOf(userApprovedParamS));
+      boolean userApproved = Boolean.valueOf(userApprovedParamS);
       boolean securityEnabled = isSecurityEnabled();
       final String remoteUser = req.getRemoteUser();
       final String pathInfo = req.getPathInfo();
 
-      String parts[] = pathInfo.split("/", 3);
-      if(parts.length < 2) {
-        LOG.warn(remoteUser+" Gave an invalid proxy path "+pathInfo);
+      String[] parts = null;
+      if (pathInfo != null) {
+        parts = pathInfo.split("/", 3);
+      }
+      if(parts == null || parts.length < 2) {
+        LOG.warn("{} gave an invalid proxy path {}", remoteUser,  pathInfo);
         notFound(resp, "Your path appears to be formatted incorrectly.");
         return;
       }
@@ -254,9 +329,9 @@ public class WebAppProxyServlet extends HttpServlet {
       String rest = parts.length > 2 ? parts[2] : "";
       ApplicationId id = Apps.toAppID(appId);
       if(id == null) {
-        LOG.warn(req.getRemoteUser()+" Attempting to access "+appId+
-        " that is invalid");
-        notFound(resp, appId+" appears to be formatted incorrectly.");
+        LOG.warn("{} attempting to access {} that is invalid",
+            remoteUser, appId);
+        notFound(resp, appId + " appears to be formatted incorrectly.");
         return;
       }
       
@@ -276,35 +351,56 @@ public class WebAppProxyServlet extends HttpServlet {
       
       boolean checkUser = securityEnabled && (!userWasWarned || !userApproved);
 
+      FetchedAppReport fetchedAppReport = null;
       ApplicationReport applicationReport = null;
       try {
-        applicationReport = getApplicationReport(id);
+        fetchedAppReport = getApplicationReport(id);
+        if (fetchedAppReport != null) {
+          if (fetchedAppReport.getAppReportSource() != AppReportSource.RM &&
+              fetchedAppReport.getAppReportSource() != AppReportSource.AHS) {
+            throw new UnsupportedOperationException("Application report not "
+                + "fetched from RM or history server.");
+          }
+          applicationReport = fetchedAppReport.getApplicationReport();
+        }
       } catch (ApplicationNotFoundException e) {
         applicationReport = null;
       }
       if(applicationReport == null) {
-        LOG.warn(req.getRemoteUser()+" Attempting to access "+id+
-            " that was not found");
+        LOG.warn("{} attempting to access {} that was not found",
+            remoteUser, id);
 
         URI toFetch =
             ProxyUriUtils
                 .getUriFromTrackingPlugins(id, this.trackingUriPlugins);
-        if (toFetch != null)
-        {
-          resp.sendRedirect(resp.encodeRedirectURL(toFetch.toString()));
+        if (toFetch != null) {
+          ProxyUtils.sendRedirect(req, resp, toFetch.toString());
           return;
         }
 
-        notFound(resp, "Application "+appId+" could not be found, " +
-        		"please try the history server");
+        notFound(resp, "Application " + appId + " could not be found " +
+            "in RM or history server");
         return;
       }
       String original = applicationReport.getOriginalTrackingUrl();
-      URI trackingUri = null;
-      // fallback to ResourceManager's app page if no tracking URI provided
-      if(original == null || original.equals("N/A")) {
-        resp.sendRedirect(resp.encodeRedirectURL(
-            StringHelper.pjoin(rmAppPageUrlBase, id.toString())));
+      URI trackingUri;
+      if (original == null || original.equals("N/A") || original.equals("")) {
+        if (fetchedAppReport.getAppReportSource() == AppReportSource.RM) {
+          // fallback to ResourceManager's app page if no tracking URI provided
+          // and Application Report was fetched from RM
+          LOG.debug("Original tracking url is '{}'. Redirecting to RM app page",
+              original == null? "NULL" : original);
+          ProxyUtils.sendRedirect(req, resp,
+              StringHelper.pjoin(rmAppPageUrlBase, id.toString()));
+        } else if (fetchedAppReport.getAppReportSource()
+              == AppReportSource.AHS) {
+          // fallback to Application History Server app page if the application
+          // report was fetched from AHS
+          LOG.debug("Original tracking url is '{}'. Redirecting to AHS app page"
+              , original == null? "NULL" : original);
+          ProxyUtils.sendRedirect(req, resp,
+              StringHelper.pjoin(ahsAppPageUrlBase, id.toString()));
+        }
         return;
       } else {
         if (ProxyUriUtils.getSchemeFromUrl(original).isEmpty()) {
@@ -317,37 +413,69 @@ public class WebAppProxyServlet extends HttpServlet {
 
       String runningUser = applicationReport.getUser();
       if(checkUser && !runningUser.equals(remoteUser)) {
-        LOG.info("Asking "+remoteUser+" if they want to connect to the " +
-            "app master GUI of "+appId+" owned by "+runningUser);
+        LOG.info("Asking {} if they want to connect to the "
+            + "app master GUI of {} owned by {}",
+            remoteUser, appId, runningUser);
         warnUserPage(resp, ProxyUriUtils.getPathAndQuery(id, rest, 
             req.getQueryString(), true), runningUser, id);
         return;
       }
-      URI toFetch = new URI(trackingUri.getScheme(), 
-          trackingUri.getAuthority(),
-          StringHelper.ujoin(trackingUri.getPath(), rest), req.getQueryString(),
-          null);
-      
-      LOG.info(req.getRemoteUser()+" is accessing unchecked "+toFetch+
-          " which is the app master GUI of "+appId+" owned by "+runningUser);
 
-      switch(applicationReport.getYarnApplicationState()) {
-      case KILLED:
-      case FINISHED:
-      case FAILED:
-        resp.sendRedirect(resp.encodeRedirectURL(toFetch.toString()));
-        return;
+      // Append the user-provided path and query parameter to the original
+      // tracking url.
+      List<NameValuePair> queryPairs =
+          URLEncodedUtils.parse(req.getQueryString(), null);
+      UriBuilder builder = UriBuilder.fromUri(trackingUri);
+      for (NameValuePair pair : queryPairs) {
+        builder.queryParam(pair.getName(), pair.getValue());
+      }
+      URI toFetch = builder.path(rest).build();
+
+      LOG.info("{} is accessing unchecked {}"
+          + " which is the app master GUI of {} owned by {}",
+          remoteUser, toFetch, appId, runningUser);
+
+      switch (applicationReport.getYarnApplicationState()) {
+        case KILLED:
+        case FINISHED:
+        case FAILED:
+          ProxyUtils.sendRedirect(req, resp, toFetch.toString());
+          return;
+        default:
+          // fall out of the switch
       }
       Cookie c = null;
-      if(userWasWarned && userApproved) {
+      if (userWasWarned && userApproved) {
         c = makeCheckCookie(id, true);
       }
-      proxyLink(req, resp, toFetch, c, getProxyHost());
+      proxyLink(req, resp, toFetch, c, getProxyHost(), method);
 
-    } catch(URISyntaxException e) {
+    } catch(URISyntaxException | YarnException e) {
       throw new IOException(e); 
-    } catch (YarnException e) {
-      throw new IOException(e);
     }
+  }
+
+  /**
+   * This method is used by Java object deserialization, to fill in the
+   * transient {@link #trackingUriPlugins} field.
+   * See {@link ObjectInputStream#defaultReadObject()}
+   * <p>
+   *   <I>Do not remove</I>
+   * <p>
+   * Yarn isn't currently serializing this class, but findbugs
+   * complains in its absence.
+   * 
+   * 
+   * @param input source
+   * @throws IOException IO failure
+   * @throws ClassNotFoundException classloader fun
+   */
+  private void readObject(ObjectInputStream input)
+      throws IOException, ClassNotFoundException {
+    input.defaultReadObject();
+    conf = new YarnConfiguration();
+    this.trackingUriPlugins =
+        conf.getInstances(YarnConfiguration.YARN_TRACKING_URL_GENERATOR,
+            TrackingUriPlugin.class);
   }
 }

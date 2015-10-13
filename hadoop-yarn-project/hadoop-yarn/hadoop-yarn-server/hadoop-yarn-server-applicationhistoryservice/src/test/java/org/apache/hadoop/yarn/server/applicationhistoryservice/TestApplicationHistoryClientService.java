@@ -41,6 +41,9 @@ import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.ApplicationAttemptNotFoundException;
+import org.apache.hadoop.yarn.exceptions.ApplicationNotFoundException;
+import org.apache.hadoop.yarn.exceptions.ContainerNotFoundException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.timeline.TimelineDataManager;
@@ -53,15 +56,18 @@ import org.junit.Test;
 public class TestApplicationHistoryClientService {
 
   private static ApplicationHistoryClientService clientService;
+  private static TimelineDataManager dataManager;
+  private final static int MAX_APPS = 2;
 
   @BeforeClass
   public static void setup() throws Exception {
     Configuration conf = new YarnConfiguration();
     TimelineStore store =
-        TestApplicationHistoryManagerOnTimelineStore.createStore(2);
+        TestApplicationHistoryManagerOnTimelineStore.createStore(MAX_APPS);
     TimelineACLsManager aclsManager = new TimelineACLsManager(conf);
-    TimelineDataManager dataManager =
+    dataManager =
         new TimelineDataManager(store, aclsManager);
+    dataManager.init(conf);
     ApplicationACLsManager appAclsManager = new ApplicationACLsManager(conf);
     ApplicationHistoryManagerOnTimelineStore historyManager =
         new ApplicationHistoryManagerOnTimelineStore(dataManager, appAclsManager);
@@ -71,15 +77,83 @@ public class TestApplicationHistoryClientService {
   }
 
   @Test
+  public void testApplicationNotFound() throws IOException, YarnException {
+    ApplicationId appId = null;
+    appId = ApplicationId.newInstance(0, MAX_APPS + 1);
+    GetApplicationReportRequest request =
+        GetApplicationReportRequest.newInstance(appId);
+    try {
+      @SuppressWarnings("unused")
+      GetApplicationReportResponse response =
+          clientService.getApplicationReport(request);
+      Assert.fail("Exception should have been thrown before we reach here.");
+    } catch (ApplicationNotFoundException e) {
+      //This exception is expected.
+      Assert.assertTrue(e.getMessage().contains(
+          "doesn't exist in the timeline store"));
+    } catch (Exception e) {
+      Assert.fail("Undesired exception caught");
+    }
+  }
+
+  @Test
+  public void testApplicationAttemptNotFound() throws IOException, YarnException {
+    ApplicationId appId = ApplicationId.newInstance(0, 1);
+    ApplicationAttemptId appAttemptId =
+        ApplicationAttemptId.newInstance(appId, MAX_APPS + 1);
+    GetApplicationAttemptReportRequest request =
+        GetApplicationAttemptReportRequest.newInstance(appAttemptId);
+    try {
+      @SuppressWarnings("unused")
+      GetApplicationAttemptReportResponse response =
+          clientService.getApplicationAttemptReport(request);
+      Assert.fail("Exception should have been thrown before we reach here.");
+    } catch (ApplicationAttemptNotFoundException e) {
+      //This Exception is expected
+      System.out.println(e.getMessage());
+      Assert.assertTrue(e.getMessage().contains(
+          "doesn't exist in the timeline store"));
+    } catch (Exception e) {
+      Assert.fail("Undesired exception caught");
+    }
+  }
+
+  @Test
+  public void testContainerNotFound() throws IOException, YarnException {
+   ApplicationId appId = ApplicationId.newInstance(0, 1);
+   ApplicationAttemptId appAttemptId =
+       ApplicationAttemptId.newInstance(appId, 1);
+   ContainerId containerId = ContainerId.newContainerId(appAttemptId,
+       MAX_APPS + 1);
+   GetContainerReportRequest request =
+       GetContainerReportRequest.newInstance(containerId);
+   try {
+   @SuppressWarnings("unused")
+   GetContainerReportResponse response =
+       clientService.getContainerReport(request);
+   } catch (ContainerNotFoundException e) {
+     //This exception is expected
+     Assert.assertTrue(e.getMessage().contains(
+         "doesn't exist in the timeline store"));
+   }  catch (Exception e) {
+      Assert.fail("Undesired exception caught");
+   }
+ }
+
+  @Test
   public void testApplicationReport() throws IOException, YarnException {
     ApplicationId appId = null;
     appId = ApplicationId.newInstance(0, 1);
     GetApplicationReportRequest request =
         GetApplicationReportRequest.newInstance(appId);
     GetApplicationReportResponse response =
-        clientService.getClientHandler().getApplicationReport(request);
+        clientService.getApplicationReport(request);
     ApplicationReport appReport = response.getApplicationReport();
     Assert.assertNotNull(appReport);
+    Assert.assertEquals(123, appReport.getApplicationResourceUsageReport()
+        .getMemorySeconds());
+    Assert.assertEquals(345, appReport.getApplicationResourceUsageReport()
+        .getVcoreSeconds());
     Assert.assertEquals("application_0_0001", appReport.getApplicationId()
       .toString());
     Assert.assertEquals("test app type",
@@ -94,11 +168,30 @@ public class TestApplicationHistoryClientService {
     ApplicationId appId1 = ApplicationId.newInstance(0, 2);
     GetApplicationsRequest request = GetApplicationsRequest.newInstance();
     GetApplicationsResponse response =
-        clientService.getClientHandler().getApplications(request);
+        clientService.getApplications(request);
     List<ApplicationReport> appReport = response.getApplicationList();
     Assert.assertNotNull(appReport);
-    Assert.assertEquals(appId, appReport.get(0).getApplicationId());
-    Assert.assertEquals(appId1, appReport.get(1).getApplicationId());
+    Assert.assertEquals(appId, appReport.get(1).getApplicationId());
+    Assert.assertEquals(appId1, appReport.get(0).getApplicationId());
+
+    // Create a historyManager, and set the max_apps can be loaded
+    // as 1.
+    Configuration conf = new YarnConfiguration();
+    conf.setLong(YarnConfiguration.APPLICATION_HISTORY_MAX_APPS, 1);
+    ApplicationHistoryManagerOnTimelineStore historyManager2 =
+        new ApplicationHistoryManagerOnTimelineStore(dataManager,
+          new ApplicationACLsManager(conf));
+    historyManager2.init(conf);
+    historyManager2.start();
+    @SuppressWarnings("resource")
+    ApplicationHistoryClientService clientService2 =
+        new ApplicationHistoryClientService(historyManager2);
+    response = clientService2.getApplications(request);
+    appReport = response.getApplicationList();
+    Assert.assertNotNull(appReport);
+    Assert.assertTrue(appReport.size() == 1);
+    // Expected to get the appReport for application with appId1
+    Assert.assertEquals(appId1, appReport.get(0).getApplicationId());
   }
 
   @Test
@@ -109,7 +202,7 @@ public class TestApplicationHistoryClientService {
     GetApplicationAttemptReportRequest request =
         GetApplicationAttemptReportRequest.newInstance(appAttemptId);
     GetApplicationAttemptReportResponse response =
-        clientService.getClientHandler().getApplicationAttemptReport(request);
+        clientService.getApplicationAttemptReport(request);
     ApplicationAttemptReport attemptReport =
         response.getApplicationAttemptReport();
     Assert.assertNotNull(attemptReport);
@@ -127,7 +220,7 @@ public class TestApplicationHistoryClientService {
     GetApplicationAttemptsRequest request =
         GetApplicationAttemptsRequest.newInstance(appId);
     GetApplicationAttemptsResponse response =
-        clientService.getClientHandler().getApplicationAttempts(request);
+        clientService.getApplicationAttempts(request);
     List<ApplicationAttemptReport> attemptReports =
         response.getApplicationAttemptList();
     Assert.assertNotNull(attemptReports);
@@ -146,7 +239,7 @@ public class TestApplicationHistoryClientService {
     GetContainerReportRequest request =
         GetContainerReportRequest.newInstance(containerId);
     GetContainerReportResponse response =
-        clientService.getClientHandler().getContainerReport(request);
+        clientService.getContainerReport(request);
     ContainerReport container = response.getContainerReport();
     Assert.assertNotNull(container);
     Assert.assertEquals(containerId, container.getContainerId());
@@ -165,7 +258,7 @@ public class TestApplicationHistoryClientService {
     GetContainersRequest request =
         GetContainersRequest.newInstance(appAttemptId);
     GetContainersResponse response =
-        clientService.getClientHandler().getContainers(request);
+        clientService.getContainers(request);
     List<ContainerReport> containers = response.getContainerList();
     Assert.assertNotNull(containers);
     Assert.assertEquals(containerId, containers.get(0).getContainerId());

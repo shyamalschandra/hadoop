@@ -22,11 +22,10 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.GregorianCalendar;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
-import org.apache.commons.logging.Log;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.protocol.Block;
@@ -38,6 +37,8 @@ import org.apache.hadoop.hdfs.DFSUtil;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import org.slf4j.Logger;
+
 /**
  * Keeps a Collection for every named machine containing blocks
  * that have recently been invalidated and are thought to live
@@ -47,7 +48,7 @@ import com.google.common.annotations.VisibleForTesting;
 class InvalidateBlocks {
   /** Mapping: DatanodeInfo -> Collection of Blocks */
   private final Map<DatanodeInfo, LightWeightHashSet<Block>> node2blocks =
-      new TreeMap<DatanodeInfo, LightWeightHashSet<Block>>();
+      new HashMap<DatanodeInfo, LightWeightHashSet<Block>>();
   /** The total number of blocks in the map. */
   private long numBlocks = 0L;
 
@@ -67,7 +68,7 @@ class InvalidateBlocks {
     printBlockDeletionTime(BlockManager.LOG);
   }
 
-  private void printBlockDeletionTime(final Log log) {
+  private void printBlockDeletionTime(final Logger log) {
     log.info(DFSConfigKeys.DFS_NAMENODE_STARTUP_DELAY_BLOCK_DELETION_SEC_KEY
         + " is set to " + DFSUtil.durationToString(pendingPeriodInMs));
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy MMM dd HH:mm:ss");
@@ -112,8 +113,8 @@ class InvalidateBlocks {
     if (set.add(block)) {
       numBlocks++;
       if (log) {
-        NameNode.blockStateChangeLog.info("BLOCK* " + getClass().getSimpleName()
-            + ": add " + block + " to " + datanode);
+        NameNode.blockStateChangeLog.debug("BLOCK* {}: add {} to {}",
+            getClass().getSimpleName(), block, datanode);
       }
     }
   }

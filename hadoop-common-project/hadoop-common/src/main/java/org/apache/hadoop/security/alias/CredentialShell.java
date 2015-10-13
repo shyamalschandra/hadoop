@@ -44,7 +44,7 @@ public class CredentialShell extends Configured implements Tool {
       "   [" + DeleteCommand.USAGE + "]\n" +
       "   [" + ListCommand.USAGE + "]\n";
 
-  private boolean interactive = false;
+  private boolean interactive = true;
   private Command command = null;
 
   /** allows stdout to be captured if necessary */
@@ -81,7 +81,7 @@ public class CredentialShell extends Configured implements Tool {
    * <pre>
    * % hadoop credential create alias [-provider providerPath]
    * % hadoop credential list [-provider providerPath]
-   * % hadoop credential delete alias [-provider providerPath] [-i]
+   * % hadoop credential delete alias [-provider providerPath] [-f]
    * </pre>
    * @param args
    * @return 0 if the argument(s) were recognized, 1 otherwise
@@ -97,6 +97,10 @@ public class CredentialShell extends Configured implements Tool {
 
     for (int i = 0; i < args.length; i++) { // parse command line
       if (args[i].equals("create")) {
+        if (i == args.length - 1) {
+          printCredShellUsage();
+          return 1;
+        }
         String alias = args[++i];
         command = new CreateCommand(alias);
         if (alias.equals("-help")) {
@@ -104,6 +108,10 @@ public class CredentialShell extends Configured implements Tool {
           return 0;
         }
       } else if (args[i].equals("delete")) {
+        if (i == args.length - 1) {
+          printCredShellUsage();
+          return 1;
+        }
         String alias = args[++i];
         command = new DeleteCommand(alias);
         if (alias.equals("-help")) {
@@ -113,11 +121,15 @@ public class CredentialShell extends Configured implements Tool {
       } else if (args[i].equals("list")) {
         command = new ListCommand();
       } else if (args[i].equals("-provider")) {
+        if (i == args.length - 1) {
+          printCredShellUsage();
+          return 1;
+        }
         userSuppliedProvider = true;
         getConf().set(CredentialProviderFactory.CREDENTIAL_PROVIDER_PATH, 
             args[++i]);
-      } else if (args[i].equals("-i") || (args[i].equals("-interactive"))) {
-        interactive = true;
+      } else if (args[i].equals("-f") || (args[i].equals("-force"))) {
+        interactive = false;
       } else if (args[i].equals("-v") || (args[i].equals("-value"))) {
         value = args[++i];
       } else if (args[i].equals("-help")) {
@@ -195,7 +207,7 @@ public class CredentialShell extends Configured implements Tool {
   }
 
   private class ListCommand extends Command {
-    public static final String USAGE = "list [-provider] [-help]";
+    public static final String USAGE = "list [-provider provider-path]";
     public static final String DESC =
         "The list subcommand displays the aliases contained within \n" +
         "a particular provider - as configured in core-site.xml or " +
@@ -236,11 +248,13 @@ public class CredentialShell extends Configured implements Tool {
   }
 
   private class DeleteCommand extends Command {
-    public static final String USAGE = "delete <alias> [-provider] [-help]";
+    public static final String USAGE =
+        "delete <alias> [-f] [-provider provider-path]";
     public static final String DESC =
-        "The delete subcommand deletes the credenital\n" +
+        "The delete subcommand deletes the credential\n" +
         "specified as the <alias> argument from within the provider\n" +
-        "indicated through the -provider argument";
+        "indicated through the -provider argument. The command asks for\n" +
+        "confirmation unless the -f option is specified.";
 
     String alias = null;
     boolean cont = true;
@@ -267,9 +281,9 @@ public class CredentialShell extends Configured implements Tool {
       if (interactive) {
         try {
           cont = ToolRunner
-              .confirmPrompt("You are about to DELETE the credential: " + 
+              .confirmPrompt("You are about to DELETE the credential " +
                   alias + " from CredentialProvider " + provider.toString() +
-                  ". Continue?:");
+                  ". Continue? ");
           if (!cont) {
             out.println("Nothing has been deleted.");
           }
@@ -293,7 +307,7 @@ public class CredentialShell extends Configured implements Tool {
           provider.flush();
           printProviderWritten();
         } catch (IOException e) {
-          out.println(alias + "has NOT been deleted.");
+          out.println(alias + " has NOT been deleted.");
           throw e;
         }
       }
@@ -306,7 +320,8 @@ public class CredentialShell extends Configured implements Tool {
   }
 
   private class CreateCommand extends Command {
-    public static final String USAGE = "create <alias> [-provider] [-help]";
+    public static final String USAGE =
+        "create <alias> [-provider provider-path]";
     public static final String DESC =
         "The create subcommand creates a new credential for the name specified\n" +
         "as the <alias> argument within the provider indicated through\n" +

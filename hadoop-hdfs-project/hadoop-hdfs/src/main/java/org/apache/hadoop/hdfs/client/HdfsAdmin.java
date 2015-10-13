@@ -29,6 +29,7 @@ import org.apache.hadoop.fs.CacheFlag;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RemoteIterator;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSInotifyEventInputStream;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.protocol.CacheDirectiveEntry;
@@ -39,6 +40,7 @@ import org.apache.hadoop.hdfs.protocol.EncryptionZone;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.hdfs.tools.DFSAdmin;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
 
 /**
  * The public API for performing administrative functions on HDFS. Those writing
@@ -95,8 +97,8 @@ public class HdfsAdmin {
   }
   
   /**
-   * Set the disk space quota (size of files) for a directory. Note that
-   * directories and sym links do not occupy disk space.
+   * Set the storage space quota (size of files) for a directory. Note that
+   * directories and sym links do not occupy storage space.
    * 
    * @param src the path to set the space quota of
    * @param spaceQuota the value to set for the space quota
@@ -107,14 +109,40 @@ public class HdfsAdmin {
   }
   
   /**
-   * Clear the disk space quota (size of files) for a directory. Note that
-   * directories and sym links do not occupy disk space.
+   * Clear the storage space quota (size of files) for a directory. Note that
+   * directories and sym links do not occupy storage space.
    * 
    * @param src the path to clear the space quota of
    * @throws IOException in the event of error
    */
   public void clearSpaceQuota(Path src) throws IOException {
     dfs.setQuota(src, HdfsConstants.QUOTA_DONT_SET, HdfsConstants.QUOTA_RESET);
+  }
+
+  /**
+   * Set the quota by storage type for a directory. Note that
+   * directories and sym links do not occupy storage type quota.
+   *
+   * @param src the target directory to set the quota by storage type
+   * @param type the storage type to set for quota by storage type
+   * @param quota the value to set for quota by storage type
+   * @throws IOException in the event of error
+   */
+  public void setQuotaByStorageType(Path src, StorageType type, long quota)
+      throws IOException {
+    dfs.setQuotaByStorageType(src, type, quota);
+  }
+
+  /**
+   * Clear the space quota by storage type for a directory. Note that
+   * directories and sym links do not occupy storage type quota.
+   *
+   * @param src the target directory to clear the quota by storage type
+   * @param type the storage type to clear for quota by storage type
+   * @throws IOException in the event of error
+   */
+  public void clearQuotaByStorageType(Path src, StorageType type) throws IOException {
+    dfs.setQuotaByStorageType(src, type, HdfsConstants.QUOTA_RESET);
   }
   
   /**
@@ -335,5 +363,40 @@ public class HdfsAdmin {
   public void setStoragePolicy(final Path src, final String policyName)
       throws IOException {
     dfs.setStoragePolicy(src, policyName);
+  }
+
+  /**
+   * Set the source path to the specified erasure coding policy.
+   *
+   * @param path The source path referring to a directory.
+   * @param ecPolicy The erasure coding policy for the directory.
+   *                 If null, the default will be used.
+   * @throws IOException
+   */
+  public void setErasureCodingPolicy(final Path path,
+      final ErasureCodingPolicy ecPolicy) throws IOException {
+    dfs.setErasureCodingPolicy(path, ecPolicy);
+  }
+
+  /**
+   * Get the erasure coding policy information for the specified path
+   *
+   * @param path
+   * @return Returns the policy information if file or directory on the path is
+   *          erasure coded. Null otherwise.
+   * @throws IOException
+   */
+  public ErasureCodingPolicy getErasureCodingPolicy(final Path path)
+      throws IOException {
+    return dfs.getErasureCodingPolicy(path);
+  }
+
+  /**
+   * Get the Erasure coding policies supported.
+   *
+   * @throws IOException
+   */
+  public ErasureCodingPolicy[] getErasureCodingPolicies() throws IOException {
+    return dfs.getClient().getErasureCodingPolicies();
   }
 }

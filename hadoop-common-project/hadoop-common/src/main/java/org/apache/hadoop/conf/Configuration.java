@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.conf;
 
+import com.google.common.annotations.VisibleForTesting;
+
 import java.io.BufferedInputStream;
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -32,7 +34,9 @@ import java.io.Reader;
 import java.io.Writer;
 import java.lang.ref.WeakReference;
 import java.net.InetSocketAddress;
+import java.net.JarURLConnection;
 import java.net.URL;
+import java.net.URLConnection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -50,6 +54,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.StringTokenizer;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -67,6 +72,7 @@ import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 
+import com.google.common.base.Charsets;
 import org.apache.commons.collections.map.UnmodifiableMap;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -86,6 +92,7 @@ import org.apache.hadoop.util.StringInterner;
 import org.apache.hadoop.util.StringUtils;
 import org.codehaus.jackson.JsonFactory;
 import org.codehaus.jackson.JsonGenerator;
+import org.w3c.dom.Attr;
 import org.w3c.dom.DOMException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -141,6 +148,8 @@ import com.google.common.base.Preconditions;
  * available properties are:<ol>
  * <li>Other properties defined in this Configuration; and, if a name is
  * undefined here,</li>
+ * <li>Environment variables in {@link System#getenv()} if a name starts with
+ * "env.", or</li>
  * <li>Properties in {@link System#getProperties()}.</li>
  * </ol>
  *
@@ -155,13 +164,25 @@ import com.google.common.base.Preconditions;
  *  &lt;property&gt;
  *    &lt;name&gt;tempdir&lt;/name&gt;
  *    &lt;value&gt;${<i>basedir</i>}/tmp&lt;/value&gt;
- *  &lt;/property&gt;</pre></tt>
+ *  &lt;/property&gt;
  *
- * When <tt>conf.get("tempdir")</tt> is called, then <tt>${<i>basedir</i>}</tt>
+ *  &lt;property&gt;
+ *    &lt;name&gt;otherdir&lt;/name&gt;
+ *    &lt;value&gt;${<i>env.BASE_DIR</i>}/other&lt;/value&gt;
+ *  &lt;/property&gt;
+ *  </pre></tt>
+ *
+ * <p>When <tt>conf.get("tempdir")</tt> is called, then <tt>${<i>basedir</i>}</tt>
  * will be resolved to another property in this Configuration, while
  * <tt>${<i>user.name</i>}</tt> would then ordinarily be resolved to the value
  * of the System property with that name.
- * By default, warnings will be given to any deprecated configuration 
+ * <p>When <tt>conf.get("otherdir")</tt> is called, then <tt>${<i>env.BASE_DIR</i>}</tt>
+ * will be resolved to the value of the <tt>${<i>BASE_DIR</i>}</tt> environment variable.
+ * It supports <tt>${<i>env.NAME:-default</i>}</tt> and <tt>${<i>env.NAME-default</i>}</tt> notations.
+ * The former is resolved to “default” if <tt>${<i>NAME</i>}</tt> environment variable is undefined
+ * or its value is empty.
+ * The latter behaves the same way only if <tt>${<i>NAME</i>}</tt> is undefined.
+ * <p>By default, warnings will be given to any deprecated configuration 
  * parameters and these are suppressible by configuring
  * <tt>log4j.logger.org.apache.hadoop.conf.Configuration.deprecation</tt> in
  * log4j.properties file.
@@ -177,7 +198,12 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     LogFactory.getLog("org.apache.hadoop.conf.Configuration.deprecation");
 
   private boolean quietmode = true;
-  
+
+  private static final String DEFAULT_STRING_CHECK =
+    "testingforemptydefaultvalue";
+
+  private boolean allowNullValueProperties = false;
+
   private static class Resource {
     private final Object resource;
     private final String name;
@@ -220,7 +246,8 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   /**
    * List of configuration parameters marked <b>final</b>. 
    */
-  private Set<String> finalParameters = new HashSet<String>();
+  private Set<String> finalParameters = Collections.newSetFromMap(
+      new ConcurrentHashMap<String, Boolean>());
   
   private boolean loadDefaults = true;
   
@@ -250,7 +277,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * Stores the mapping of key to the resource which modifies or loads 
    * the key most recently
    */
-  private HashMap<String, String[]> updatingResource;
+  private Map<String, String[]> updatingResource;
  
   /**
    * Class to keep the information about the keys which replace the deprecated
@@ -422,8 +449,6 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         CommonConfigurationKeys.NET_TOPOLOGY_NODE_SWITCH_MAPPING_IMPL_KEY),
       new DeprecationDelta("dfs.df.interval", 
         CommonConfigurationKeys.FS_DF_INTERVAL_KEY),
-      new DeprecationDelta("hadoop.native.lib", 
-        CommonConfigurationKeys.IO_NATIVE_LIB_AVAILABLE_KEY),
       new DeprecationDelta("fs.default.name", 
         CommonConfigurationKeys.FS_DEFAULT_NAME_KEY),
       new DeprecationDelta("dfs.umaskmode",
@@ -677,7 +702,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public Configuration(boolean loadDefaults) {
     this.loadDefaults = loadDefaults;
-    updatingResource = new HashMap<String, String[]>();
+    updatingResource = new ConcurrentHashMap<String, String[]>();
     synchronized(Configuration.class) {
       REGISTRY.put(this, null);
     }
@@ -700,8 +725,11 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
        this.overlay = (Properties)other.overlay.clone();
      }
 
-     this.updatingResource = new HashMap<String, String[]>(other.updatingResource);
-     this.finalParameters = new HashSet<String>(other.finalParameters);
+     this.updatingResource = new ConcurrentHashMap<String, String[]>(
+         other.updatingResource);
+     this.finalParameters = Collections.newSetFromMap(
+         new ConcurrentHashMap<String, Boolean>());
+     this.finalParameters.addAll(other.finalParameters);
    }
    
     synchronized(Configuration.class) {
@@ -831,34 +859,134 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     resources.add(resource);                      // add to resources
     reloadConfiguration();
   }
-  
-  private static final Pattern VAR_PATTERN =
-      Pattern.compile("\\$\\{[^\\}\\$\u0020]+\\}");
 
   private static final int MAX_SUBST = 20;
 
+  private static final int SUB_START_IDX = 0;
+  private static final int SUB_END_IDX = SUB_START_IDX + 1;
+
+  /**
+   * This is a manual implementation of the following regex
+   * "\\$\\{[^\\}\\$\u0020]+\\}". It can be 15x more efficient than
+   * a regex matcher as demonstrated by HADOOP-11506. This is noticeable with
+   * Hadoop apps building on the assumption Configuration#get is an O(1)
+   * hash table lookup, especially when the eval is a long string.
+   *
+   * @param eval a string that may contain variables requiring expansion.
+   * @return a 2-element int array res such that
+   * eval.substring(res[0], res[1]) is "var" for the left-most occurrence of
+   * ${var} in eval. If no variable is found -1, -1 is returned.
+   */
+  private static int[] findSubVariable(String eval) {
+    int[] result = {-1, -1};
+
+    int matchStart;
+    int leftBrace;
+
+    // scanning for a brace first because it's less frequent than $
+    // that can occur in nested class names
+    //
+    match_loop:
+    for (matchStart = 1, leftBrace = eval.indexOf('{', matchStart);
+         // minimum left brace position (follows '$')
+         leftBrace > 0
+         // right brace of a smallest valid expression "${c}"
+         && leftBrace + "{c".length() < eval.length();
+         leftBrace = eval.indexOf('{', matchStart)) {
+      int matchedLen = 0;
+      if (eval.charAt(leftBrace - 1) == '$') {
+        int subStart = leftBrace + 1; // after '{'
+        for (int i = subStart; i < eval.length(); i++) {
+          switch (eval.charAt(i)) {
+            case '}':
+              if (matchedLen > 0) { // match
+                result[SUB_START_IDX] = subStart;
+                result[SUB_END_IDX] = subStart + matchedLen;
+                break match_loop;
+              }
+              // fall through to skip 1 char
+            case ' ':
+            case '$':
+              matchStart = i + 1;
+              continue match_loop;
+            default:
+              matchedLen++;
+          }
+        }
+        // scanned from "${"  to the end of eval, and no reset via ' ', '$':
+        //    no match!
+        break match_loop;
+      } else {
+        // not a start of a variable
+        //
+        matchStart = leftBrace + 1;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Attempts to repeatedly expand the value {@code expr} by replacing the
+   * left-most substring of the form "${var}" in the following precedence order
+   * <ol>
+   *   <li>by the value of the environment variable "var" if defined</li>
+   *   <li>by the value of the Java system property "var" if defined</li>
+   *   <li>by the value of the configuration key "var" if defined</li>
+   * </ol>
+   *
+   * If var is unbounded the current state of expansion "prefix${var}suffix" is
+   * returned.
+   *
+   * If a cycle is detected: replacing var1 requires replacing var2 ... requires
+   * replacing var1, i.e., the cycle is shorter than
+   * {@link Configuration#MAX_SUBST} then the original expr is returned.
+   *
+   * @param expr the literal value of a config key
+   * @return null if expr is null, otherwise the value resulting from expanding
+   * expr using the algorithm above.
+   * @throws IllegalArgumentException when more than
+   * {@link Configuration#MAX_SUBST} replacements are required
+   */
   private String substituteVars(String expr) {
     if (expr == null) {
       return null;
     }
-    Matcher match = VAR_PATTERN.matcher("");
     String eval = expr;
-    Set<String> evalSet = new HashSet<String>();
-    for(int s=0; s<MAX_SUBST; s++) {
-      if (evalSet.contains(eval)) {
-        // Cyclic resolution pattern detected. Return current expression.
+    Set<String> evalSet = null;
+    for(int s = 0; s < MAX_SUBST; s++) {
+      final int[] varBounds = findSubVariable(eval);
+      if (varBounds[SUB_START_IDX] == -1) {
         return eval;
       }
-      evalSet.add(eval);
-      match.reset(eval);
-      if (!match.find()) {
-        return eval;
-      }
-      String var = match.group();
-      var = var.substring(2, var.length()-1); // remove ${ .. }
+      final String var = eval.substring(varBounds[SUB_START_IDX],
+          varBounds[SUB_END_IDX]);
       String val = null;
       try {
-        val = System.getProperty(var);
+        if (var.startsWith("env.") && 4 < var.length()) {
+          String v = var.substring(4);
+          int i = 0;
+          for (; i < v.length(); i++) {
+            char c = v.charAt(i);
+            if (c == ':' && i < v.length() - 1 && v.charAt(i + 1) == '-') {
+              val = getenv(v.substring(0, i));
+              if (val == null || val.length() == 0) {
+                val = v.substring(i + 2);
+              }
+              break;
+            } else if (c == '-') {
+              val = getenv(v.substring(0, i));
+              if (val == null) {
+                val = v.substring(i + 1);
+              }
+              break;
+            }
+          }
+          if (i == v.length()) {
+            val = getenv(v);
+          }
+        } else {
+          val = getProperty(var);
+        }
       } catch(SecurityException se) {
         LOG.warn("Unexpected SecurityException in Configuration", se);
       }
@@ -868,13 +996,36 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       if (val == null) {
         return eval; // return literal ${var}: var is unbound
       }
+
+      // prevent recursive resolution
+      //
+      final int dollar = varBounds[SUB_START_IDX] - "${".length();
+      final int afterRightBrace = varBounds[SUB_END_IDX] + "}".length();
+      final String refVar = eval.substring(dollar, afterRightBrace);
+      if (evalSet == null) {
+        evalSet = new HashSet<String>();
+      }
+      if (!evalSet.add(refVar)) {
+        return expr; // return original expression if there is a loop
+      }
+
       // substitute
-      eval = eval.substring(0, match.start())+val+eval.substring(match.end());
+      eval = eval.substring(0, dollar)
+             + val
+             + eval.substring(afterRightBrace);
     }
     throw new IllegalStateException("Variable substitution depth too large: " 
                                     + MAX_SUBST + " " + expr);
   }
   
+  String getenv(String name) {
+    return System.getenv(name);
+  }
+
+  String getProperty(String key) {
+    return System.getProperty(key);
+  }
+
   /**
    * Get the value of the <code>name</code> property, <code>null</code> if
    * no such property exists. If the key is deprecated, it returns the value of
@@ -895,7 +1046,38 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     }
     return result;
   }
-  
+
+  /**
+   * Set Configuration to allow keys without values during setup.  Intended
+   * for use during testing.
+   *
+   * @param val If true, will allow Configuration to store keys without values
+   */
+  @VisibleForTesting
+  public void setAllowNullValueProperties( boolean val ) {
+    this.allowNullValueProperties = val;
+  }
+
+  /**
+   * Return existence of the <code>name</code> property, but only for
+   * names which have no valid value, usually non-existent or commented
+   * out in XML.
+   *
+   * @param name the property name
+   * @return true if the property <code>name</code> exists without value
+   */
+  @VisibleForTesting
+  public boolean onlyKeyExists(String name) {
+    String[] names = handleDeprecation(deprecationContext.get(), name);
+    for(String n : names) {
+      if ( getProps().getProperty(n,DEFAULT_STRING_CHECK)
+               .equals(DEFAULT_STRING_CHECK) ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Get the value of the <code>name</code> property as a trimmed <code>String</code>, 
    * <code>null</code> if no such property exists. 
@@ -1316,11 +1498,9 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       return defaultValue;
     }
 
-    valueString = valueString.toLowerCase();
-
-    if ("true".equals(valueString))
+    if (StringUtils.equalsIgnoreCase("true", valueString))
       return true;
-    else if ("false".equals(valueString))
+    else if (StringUtils.equalsIgnoreCase("false", valueString))
       return false;
     else return defaultValue;
   }
@@ -1356,13 +1536,14 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
 
   /**
    * Return value matching this enumerated type.
+   * Note that the returned value is trimmed by this method.
    * @param name Property name
    * @param defaultValue Value returned if no mapping exists
    * @throws IllegalArgumentException If mapping is illegal for the type
    * provided
    */
   public <T extends Enum<T>> T getEnum(String name, T defaultValue) {
-    final String val = get(name);
+    final String val = getTrimmed(name);
     return null == val
       ? defaultValue
       : Enum.valueOf(defaultValue.getDeclaringClass(), val);
@@ -1459,6 +1640,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * Get the value of the <code>name</code> property as a <code>Pattern</code>.
    * If no such property is specified, or if the specified value is not a valid
    * <code>Pattern</code>, then <code>DefaultValue</code> is returned.
+   * Note that the returned value is NOT trimmed by this method.
    *
    * @param name property name
    * @param defaultValue default value
@@ -1487,11 +1669,8 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * @param pattern new value
    */
   public void setPattern(String name, Pattern pattern) {
-    if (null == pattern) {
-      set(name, null);
-    } else {
-      set(name, pattern.pattern());
-    }
+    assert pattern != null : "Pattern cannot be null";
+    set(name, pattern.pattern());
   }
 
   /**
@@ -1912,7 +2091,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    */
   public InetSocketAddress getSocketAddr(
       String name, String defaultAddress, int defaultPort) {
-    final String address = get(name, defaultAddress);
+    final String address = getTrimmed(name, defaultAddress);
     return NetUtils.createSocketAddr(address, defaultPort, name);
   }
 
@@ -2266,7 +2445,7 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         LOG.info("found resource " + name + " at " + url);
       }
 
-      return new InputStreamReader(url.openStream());
+      return new InputStreamReader(url.openStream(), Charsets.UTF_8);
     } catch (Exception e) {
       return null;
     }
@@ -2278,20 +2457,27 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
    * @return final parameter set.
    */
   public Set<String> getFinalParameters() {
-    return new HashSet<String>(finalParameters);
+    Set<String> setFinalParams = Collections.newSetFromMap(
+        new ConcurrentHashMap<String, Boolean>());
+    setFinalParams.addAll(finalParameters);
+    return setFinalParams;
   }
 
   protected synchronized Properties getProps() {
     if (properties == null) {
       properties = new Properties();
-      HashMap<String, String[]> backup = 
-        new HashMap<String, String[]>(updatingResource);
+      Map<String, String[]> backup =
+          new ConcurrentHashMap<String, String[]>(updatingResource);
       loadResources(properties, resources, quietmode);
-      if (overlay!= null) {
+
+      if (overlay != null) {
         properties.putAll(overlay);
         for (Map.Entry<Object,Object> item: overlay.entrySet()) {
           String key = (String)item.getKey();
-          updatingResource.put(key, backup.get(key));
+          String[] source = backup.get(key);
+          if(source != null) {
+            updatingResource.put(key, source);
+          }
         }
       }
     }
@@ -2329,9 +2515,9 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
     // code.
     Map<String,String> result = new HashMap<String,String>();
     for(Map.Entry<Object,Object> item: getProps().entrySet()) {
-      if (item.getKey() instanceof String && 
+      if (item.getKey() instanceof String &&
           item.getValue() instanceof String) {
-        result.put((String) item.getKey(), (String) item.getValue());
+          result.put((String) item.getKey(), (String) item.getValue());
       }
     }
     return result.entrySet().iterator();
@@ -2340,12 +2526,21 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
   private Document parse(DocumentBuilder builder, URL url)
       throws IOException, SAXException {
     if (!quietmode) {
-      LOG.debug("parsing URL " + url);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("parsing URL " + url);
+      }
     }
     if (url == null) {
       return null;
     }
-    return parse(builder, url.openStream(), url.toString());
+
+    URLConnection connection = url.openConnection();
+    if (connection instanceof JarURLConnection) {
+      // Disable caching for JarURLConnection to avoid sharing JarFile
+      // with other users.
+      connection.setUseCaches(false);
+    }
+    return parse(builder, connection.getInputStream(), url.toString());
   }
 
   private Document parse(DocumentBuilder builder, InputStream is,
@@ -2466,11 +2661,26 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
         }
         if (!"property".equals(prop.getTagName()))
           LOG.warn("bad conf file: element not <property>");
-        NodeList fields = prop.getChildNodes();
+
         String attr = null;
         String value = null;
         boolean finalParameter = false;
         LinkedList<String> source = new LinkedList<String>();
+
+        Attr propAttr = prop.getAttributeNode("name");
+        if (propAttr != null)
+          attr = StringInterner.weakIntern(propAttr.getValue());
+        propAttr = prop.getAttributeNode("value");
+        if (propAttr != null)
+          value = StringInterner.weakIntern(propAttr.getValue());
+        propAttr = prop.getAttributeNode("final");
+        if (propAttr != null)
+          finalParameter = "true".equals(propAttr.getValue());
+        propAttr = prop.getAttributeNode("source");
+        if (propAttr != null)
+          source.add(StringInterner.weakIntern(propAttr.getValue()));
+
+        NodeList fields = prop.getChildNodes();
         for (int j = 0; j < fields.getLength(); j++) {
           Node fieldNode = fields.item(j);
           if (!(fieldNode instanceof Element))
@@ -2534,19 +2744,24 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       to.put(entry.getKey(), entry.getValue());
     }
   }
-  
+
   private void loadProperty(Properties properties, String name, String attr,
       String value, boolean finalParameter, String[] source) {
-    if (value != null) {
+    if (value != null || allowNullValueProperties) {
+      if (value == null) {
+        value = DEFAULT_STRING_CHECK;
+      }
       if (!finalParameters.contains(attr)) {
         properties.setProperty(attr, value);
-        updatingResource.put(attr, source);
+        if(source != null) {
+          updatingResource.put(attr, source);
+        }
       } else if (!value.equals(properties.getProperty(attr))) {
         LOG.warn(name+":an attempt to override final parameter: "+attr
             +";  Ignoring.");
       }
     }
-    if (finalParameter) {
+    if (finalParameter && attr != null) {
       finalParameters.add(attr);
     }
   }
@@ -2749,7 +2964,9 @@ public class Configuration implements Iterable<Map.Entry<String,String>>,
       String value = org.apache.hadoop.io.Text.readString(in);
       set(key, value); 
       String sources[] = WritableUtils.readCompressedStringArray(in);
-      updatingResource.put(key, sources);
+      if(sources != null) {
+        updatingResource.put(key, sources);
+      }
     }
   }
 

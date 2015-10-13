@@ -36,6 +36,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.TaskCompletionEvent;
 import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.JobACL;
+import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.v2.api.records.AMInfo;
 import org.apache.hadoop.mapreduce.v2.api.records.JobId;
 import org.apache.hadoop.mapreduce.v2.api.records.JobReport;
@@ -68,13 +69,13 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.event.AsyncDispatcher;
 import org.apache.hadoop.yarn.event.EventHandler;
 import org.apache.hadoop.yarn.factories.RecordFactory;
 import org.apache.hadoop.yarn.factory.providers.RecordFactoryProvider;
 import org.apache.hadoop.yarn.security.client.ClientToAMTokenSecretManager;
 import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.ControlledClock;
 import org.apache.hadoop.yarn.util.SystemClock;
 import org.junit.Assert;
 import org.junit.Test;
@@ -89,7 +90,7 @@ public class TestRuntimeEstimators {
   private static int MAP_TASKS = 200;
   private static int REDUCE_TASKS = 150;
 
-  MockClock clock;
+  ControlledClock clock;
 
   Job myJob;
 
@@ -119,7 +120,7 @@ public class TestRuntimeEstimators {
   private void coreTestEstimator
       (TaskRuntimeEstimator testedEstimator, int expectedSpeculations) {
     estimator = testedEstimator;
-	clock = new MockClock();
+	clock = new ControlledClock();
 	dispatcher = new AsyncDispatcher();
     myJob = null;
     slotsInUse.set(0);
@@ -128,7 +129,7 @@ public class TestRuntimeEstimators {
     successfulSpeculations.set(0);
     taskTimeSavedBySpeculation.set(0);
 
-    clock.advanceTime(1000);
+    clock.tickMsec(1000);
 
     Configuration conf = new Configuration();
 
@@ -137,7 +138,22 @@ public class TestRuntimeEstimators {
 
     estimator.contextualize(conf, myAppContext);
 
+    conf.setLong(MRJobConfig.SPECULATIVE_RETRY_AFTER_NO_SPECULATE, 500L);
+    conf.setLong(MRJobConfig.SPECULATIVE_RETRY_AFTER_SPECULATE, 5000L);
+    conf.setDouble(MRJobConfig.SPECULATIVECAP_RUNNING_TASKS, 0.1);
+    conf.setDouble(MRJobConfig.SPECULATIVECAP_TOTAL_TASKS, 0.001);
+    conf.setInt(MRJobConfig.SPECULATIVE_MINIMUM_ALLOWED_TASKS, 5);
     speculator = new DefaultSpeculator(conf, myAppContext, estimator, clock);
+    Assert.assertEquals("wrong SPECULATIVE_RETRY_AFTER_NO_SPECULATE value",
+        500L, speculator.getSoonestRetryAfterNoSpeculate());
+    Assert.assertEquals("wrong SPECULATIVE_RETRY_AFTER_SPECULATE value",
+        5000L, speculator.getSoonestRetryAfterSpeculate());
+    Assert.assertEquals(speculator.getProportionRunningTasksSpeculatable(),
+        0.1, 0.00001);
+    Assert.assertEquals(speculator.getProportionTotalTasksSpeculatable(),
+        0.001, 0.00001);
+    Assert.assertEquals("wrong SPECULATIVE_MINIMUM_ALLOWED_TASKS value",
+        5, speculator.getMinimumAllowedSpeculativeTasks());
 
     dispatcher.register(Speculator.EventType.class, speculator);
 
@@ -214,7 +230,7 @@ public class TestRuntimeEstimators {
         }
       }
 
-      clock.advanceTime(1000L);
+      clock.tickMsec(1000L);
 
       if (clock.getTime() % 10000L == 0L) {
         speculator.scanForSpeculations();
@@ -761,22 +777,6 @@ public class TestRuntimeEstimators {
     }
   }
 
-  static class MockClock implements Clock {
-    private long currentTime = 0;
-
-    public long getTime() {
-      return currentTime;
-    }
-
-    void setMeasuredTime(long newTime) {
-      currentTime = newTime;
-    }
-
-    void advanceTime(long increment) {
-      currentTime += increment;
-    }
-  }
-
   class MyAppMaster extends CompositeService {
     final Clock clock;
       public MyAppMaster(Clock clock) {
@@ -882,6 +882,11 @@ public class TestRuntimeEstimators {
     @Override
     public String getNMHostname() {
       // bogus - Not Required
+      return null;
+    }
+
+    @Override
+    public TaskAttemptFinishingMonitor getTaskAttemptFinishingMonitor() {
       return null;
     }
   }

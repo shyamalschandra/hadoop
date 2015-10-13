@@ -25,7 +25,6 @@
 #include "org_apache_hadoop_io_compress_bzip2.h"
 #include "org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor.h"
 
-static jfieldID Bzip2Decompressor_clazz;
 static jfieldID Bzip2Decompressor_stream;
 static jfieldID Bzip2Decompressor_compressedDirectBuf;
 static jfieldID Bzip2Decompressor_compressedDirectBufOff;
@@ -42,15 +41,25 @@ JNIEXPORT void JNICALL
 Java_org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor_initIDs(
                                  JNIEnv *env, jclass class, jstring libname)
 {
-    const char* bzlib_name = (*env)->GetStringUTFChars(env, libname, NULL);
-    if (strcmp(bzlib_name, "system-native") == 0)
-      bzlib_name = HADOOP_BZIP2_LIBRARY;
+    const char *bzlib_name = NULL;
+    const char *java_lib_name = (*env)->GetStringUTFChars(env, libname, NULL);
+    if (java_lib_name == NULL) {
+        // Java code will get OutOfMemoryException thrown by GetStringUTFChars
+        goto cleanup;
+    }
+
+    if (strcmp(java_lib_name, "system-native") == 0) {
+        bzlib_name = HADOOP_BZIP2_LIBRARY;
+    } else {
+        bzlib_name = java_lib_name;
+    }
+
     // Load the native library.
     void *libbz2 = dlopen(bzlib_name, RTLD_LAZY | RTLD_GLOBAL);
     if (!libbz2) {
         THROW(env, "java/lang/UnsatisfiedLinkError",
               "Cannot load bzip2 native library");
-        return;
+        goto cleanup;
     }
 
     // Locate the requisite symbols from libbz2.so.
@@ -63,8 +72,6 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor_initIDs(
                         "BZ2_bzDecompressEnd");
 
     // Initialize the requisite fieldIds.
-    Bzip2Decompressor_clazz = (*env)->GetStaticFieldID(env, class, "clazz", 
-                                                       "Ljava/lang/Class;");
     Bzip2Decompressor_stream = (*env)->GetFieldID(env, class, "stream", "J");
     Bzip2Decompressor_finished = (*env)->GetFieldID(env, class,
                                                     "finished", "Z");
@@ -80,6 +87,11 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor_initIDs(
                                                 "Ljava/nio/Buffer;");
     Bzip2Decompressor_directBufferSize = (*env)->GetFieldID(env, class, 
                                                 "directBufferSize", "I");
+cleanup:
+    if(java_lib_name != NULL) {
+         (*env)->ReleaseStringUTFChars(env,libname,java_lib_name);
+         java_lib_name = NULL;
+    }
 }
 
 JNIEXPORT jlong JNICALL
@@ -129,8 +141,6 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor_inflateBytesDirect(
         return (jint)0;
     } 
 
-    jobject clazz = (*env)->GetStaticObjectField(env, this, 
-                                                 Bzip2Decompressor_clazz);
     jarray compressed_direct_buf = (jarray)(*env)->GetObjectField(env,
                                 this, Bzip2Decompressor_compressedDirectBuf);
     jint compressed_direct_buf_off = (*env)->GetIntField(env, this, 
@@ -144,12 +154,10 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor_inflateBytesDirect(
                                 Bzip2Decompressor_directBufferSize);
 
     // Get the input and output direct buffers.
-    LOCK_CLASS(env, clazz, "Bzip2Decompressor");
     char* compressed_bytes = (*env)->GetDirectBufferAddress(env, 
                                                 compressed_direct_buf);
     char* uncompressed_bytes = (*env)->GetDirectBufferAddress(env, 
                                                 uncompressed_direct_buf);
-    UNLOCK_CLASS(env, clazz, "Bzip2Decompressor");
 
     if (!compressed_bytes || !uncompressed_bytes) {
         return (jint)0;
@@ -237,9 +245,10 @@ Java_org_apache_hadoop_io_compress_bzip2_Bzip2Decompressor_end(
 {
     if (dlsym_BZ2_bzDecompressEnd(BZSTREAM(stream)) != BZ_OK) {
         THROW(env, "java/lang/InternalError", 0);
-    } else {
-        free(BZSTREAM(stream));
     }
+
+    free(BZSTREAM(stream));
+
 }
 
 /**

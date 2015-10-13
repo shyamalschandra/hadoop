@@ -19,6 +19,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -42,8 +43,8 @@ public class Exec {
    * Runs the specified command and saves each line of the command's output to
    * the given list.
    * 
-   * @param command List<String> containing command and all arguments
-   * @param output List<String> in/out parameter to receive command output
+   * @param command List containing command and all arguments
+   * @param output List in/out parameter to receive command output
    * @return int exit code of command
    */
   public int run(List<String> command, List<String> output) {
@@ -87,7 +88,11 @@ public class Exec {
     public OutputBufferThread(InputStream is) {
       this.setDaemon(true);
       output = new ArrayList<String>();
-      reader = new BufferedReader(new InputStreamReader(is));
+      try {
+        reader = new BufferedReader(new InputStreamReader(is, "UTF-8"));
+      } catch (UnsupportedEncodingException e) {
+        throw new RuntimeException("Unsupported encoding " + e.toString());
+      }
     }
 
     @Override

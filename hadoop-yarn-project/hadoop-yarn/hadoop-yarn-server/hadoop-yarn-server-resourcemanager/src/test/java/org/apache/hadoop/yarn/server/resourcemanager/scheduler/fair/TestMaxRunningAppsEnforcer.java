@@ -31,6 +31,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.hadoop.yarn.util.ControlledClock;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -40,14 +41,14 @@ public class TestMaxRunningAppsEnforcer {
   private Map<String, Integer> userMaxApps;
   private MaxRunningAppsEnforcer maxAppsEnforcer;
   private int appNum;
-  private TestFairScheduler.MockClock clock;
+  private ControlledClock clock;
   private RMContext rmContext;
   private FairScheduler scheduler;
   
   @Before
   public void setup() throws Exception {
     Configuration conf = new Configuration();
-    clock = new TestFairScheduler.MockClock();
+    clock = new ControlledClock();
     scheduler = mock(FairScheduler.class);
     when(scheduler.getConf()).thenReturn(
         new FairSchedulerConfiguration(conf));
@@ -97,13 +98,13 @@ public class TestMaxRunningAppsEnforcer {
     FSAppAttempt app1 = addApp(leaf1, "user");
     addApp(leaf2, "user");
     addApp(leaf2, "user");
-    assertEquals(1, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(1, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumNonRunnableApps());
     removeApp(app1);
-    assertEquals(0, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(0, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumNonRunnableApps());
   }
   
   @Test
@@ -114,13 +115,13 @@ public class TestMaxRunningAppsEnforcer {
     FSAppAttempt app1 = addApp(leaf1, "user");
     addApp(leaf2, "user");
     addApp(leaf2, "user");
-    assertEquals(1, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(1, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumNonRunnableApps());
     removeApp(app1);
-    assertEquals(0, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(2, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(0, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(0, leaf1.getNumRunnableApps());
+    assertEquals(2, leaf2.getNumRunnableApps());
+    assertEquals(0, leaf2.getNumNonRunnableApps());
   }
   
   @Test
@@ -133,14 +134,14 @@ public class TestMaxRunningAppsEnforcer {
     addApp(leaf1, "user2");
     addApp(leaf1, "user3");
     addApp(leaf2, "user1");
-    assertEquals(2, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf1.getNonRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(2, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf1.getNumNonRunnableApps());
+    assertEquals(1, leaf2.getNumNonRunnableApps());
     removeApp(app1);
-    assertEquals(2, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(0, leaf1.getNonRunnableAppSchedulables().size());
-    assertEquals(0, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(2, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumRunnableApps());
+    assertEquals(0, leaf1.getNumNonRunnableApps());
+    assertEquals(0, leaf2.getNumNonRunnableApps());
   }
   
   @Test
@@ -151,16 +152,16 @@ public class TestMaxRunningAppsEnforcer {
     FSAppAttempt app1 = addApp(leaf1, "user");
     addApp(leaf2, "user");
     addApp(leaf2, "user");
-    clock.tick(20);
+    clock.tickSec(20);
     addApp(leaf1, "user");
-    assertEquals(1, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf1.getNonRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(1, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumRunnableApps());
+    assertEquals(1, leaf1.getNumNonRunnableApps());
+    assertEquals(1, leaf2.getNumNonRunnableApps());
     removeApp(app1);
-    assertEquals(0, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(2, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(0, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(0, leaf1.getNumRunnableApps());
+    assertEquals(2, leaf2.getNumRunnableApps());
+    assertEquals(0, leaf2.getNumNonRunnableApps());
   }
   
   @Test
@@ -172,13 +173,13 @@ public class TestMaxRunningAppsEnforcer {
     addApp(leaf2, "user");
     addApp(leaf2, "user");
     addApp(leaf2, "user");
-    assertEquals(1, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(2, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(1, leaf1.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumRunnableApps());
+    assertEquals(2, leaf2.getNumNonRunnableApps());
     removeApp(app1);
-    assertEquals(0, leaf1.getRunnableAppSchedulables().size());
-    assertEquals(2, leaf2.getRunnableAppSchedulables().size());
-    assertEquals(1, leaf2.getNonRunnableAppSchedulables().size());
+    assertEquals(0, leaf1.getNumRunnableApps());
+    assertEquals(2, leaf2.getNumRunnableApps());
+    assertEquals(1, leaf2.getNumNonRunnableApps());
   }
   
   @Test

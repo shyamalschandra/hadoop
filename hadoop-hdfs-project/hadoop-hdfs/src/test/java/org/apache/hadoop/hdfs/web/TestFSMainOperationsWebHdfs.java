@@ -17,23 +17,33 @@
  */
 package org.apache.hadoop.hdfs.web;
 
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.doReturn;
+
 import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.URL;
 import java.security.PrivilegedExceptionAction;
 
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.FSMainOperationsBaseTest;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.web.resources.ExceptionHandler;
+import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+import org.apache.hadoop.hdfs.web.resources.HttpOpParam;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.AfterClass;
 import org.junit.Assert;
@@ -42,7 +52,7 @@ import org.junit.Test;
 
 public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
   {
-    ((Log4JLogger)ExceptionHandler.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(ExceptionHandler.LOG, Level.ALL);
   }
 
   private static MiniDFSCluster cluster = null;
@@ -61,7 +71,6 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
   @BeforeClass
   public static void setupCluster() {
     final Configuration conf = new Configuration();
-    conf.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
     conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, 1024);
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
@@ -71,7 +80,7 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
       cluster.getFileSystem().setPermission(
           new Path("/"), new FsPermission((short)0777));
 
-      final String uri = WebHdfsFileSystem.SCHEME  + "://"
+      final String uri = WebHdfsConstants.WEBHDFS_SCHEME + "://"
           + conf.get(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY);
 
       //get file system as a non-superuser
@@ -126,6 +135,74 @@ public class TestFSMainOperationsWebHdfs extends FSMainOperationsBaseTest {
 
     FileStatus fileStatus = fSys.getFileStatus(catPath);
     Assert.assertEquals(1024*4, fileStatus.getLen());
+  }
+
+  @Test
+  public void testTruncate() throws Exception {
+    final short repl = 3;
+    final int blockSize = 1024;
+    final int numOfBlocks = 2;
+    Path dir = getTestRootPath(fSys, "test/hadoop");
+    Path file = getTestRootPath(fSys, "test/hadoop/file");
+
+    final byte[] data = getFileData(numOfBlocks, blockSize);
+    createFile(fSys, file, data, blockSize, repl);
+
+    final int newLength = blockSize;
+
+    boolean isReady = fSys.truncate(file, newLength);
+
+    Assert.assertTrue("Recovery is not expected.", isReady);
+
+    FileStatus fileStatus = fSys.getFileStatus(file);
+    Assert.assertEquals(fileStatus.getLen(), newLength);
+    AppendTestUtil.checkFullFile(fSys, file, newLength, data, file.toString());
+
+    ContentSummary cs = fSys.getContentSummary(dir);
+    Assert.assertEquals("Bad disk space usage", cs.getSpaceConsumed(),
+        newLength * repl);
+    Assert.assertTrue("Deleted", fSys.delete(dir, true));
+  }
+
+  // Test that WebHdfsFileSystem.jsonParse() closes the connection's input
+  // stream.
+  // Closing the inputstream in jsonParse will allow WebHDFS to reuse
+  // connections to the namenode rather than needing to always open new ones.
+  boolean closedInputStream = false;
+  @Test
+  public void testJsonParseClosesInputStream() throws Exception {
+    final WebHdfsFileSystem webhdfs = (WebHdfsFileSystem)fileSystem;
+    Path file = getTestRootPath(fSys, "test/hadoop/file");
+    createFile(file);
+    final HttpOpParam.Op op = GetOpParam.Op.GETHOMEDIRECTORY;
+    final URL url = webhdfs.toUrl(op, file);
+    final HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+    conn.setRequestMethod(op.getType().toString());
+    conn.connect();
+
+    InputStream myIn = new InputStream(){
+      private HttpURLConnection localConn = conn;
+      @Override
+      public void close() throws IOException {
+        closedInputStream = true;
+        localConn.getInputStream().close();
+      }
+      @Override
+      public int read() throws IOException {
+        return localConn.getInputStream().read();
+      }
+    };
+    final HttpURLConnection spyConn = spy(conn);
+    doReturn(myIn).when(spyConn).getInputStream();
+
+    try {
+      Assert.assertFalse(closedInputStream);
+      WebHdfsFileSystem.jsonParse(spyConn, false);
+      Assert.assertTrue(closedInputStream);
+    } catch(IOException ioe) {
+      junit.framework.TestCase.fail();
+    }
+    conn.disconnect();
   }
 
   @Override

@@ -17,10 +17,7 @@
  */
 package org.apache.hadoop.hdfs.web;
 
-import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.server.namenode.FSAclBaseTest;
-import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.junit.BeforeClass;
 import org.junit.Ignore;
@@ -34,9 +31,7 @@ public class TestWebHDFSAcl extends FSAclBaseTest {
   @BeforeClass
   public static void init() throws Exception {
     conf = WebHdfsTestUtil.createConf();
-    conf.setBoolean(DFSConfigKeys.DFS_NAMENODE_ACLS_ENABLED_KEY, true);
-    cluster = new MiniDFSCluster.Builder(conf).numDataNodes(1).build();
-    cluster.waitActive();
+    startCluster();
   }
 
   /**
@@ -57,7 +52,7 @@ public class TestWebHDFSAcl extends FSAclBaseTest {
    */
   @Override
   protected WebHdfsFileSystem createFileSystem() throws Exception {
-    return WebHdfsTestUtil.getWebHdfsFileSystem(conf, WebHdfsFileSystem.SCHEME);
+    return WebHdfsTestUtil.getWebHdfsFileSystem(conf, WebHdfsConstants.WEBHDFS_SCHEME);
   }
 
   /**
@@ -71,6 +66,6 @@ public class TestWebHDFSAcl extends FSAclBaseTest {
   protected WebHdfsFileSystem createFileSystem(UserGroupInformation user)
       throws Exception {
     return WebHdfsTestUtil.getWebHdfsFileSystemAs(user, conf,
-      WebHdfsFileSystem.SCHEME);
+      WebHdfsConstants.WEBHDFS_SCHEME);
   }
 }

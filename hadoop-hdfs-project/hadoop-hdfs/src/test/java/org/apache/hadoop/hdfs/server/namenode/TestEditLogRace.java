@@ -32,7 +32,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.permission.FsPermission;
@@ -47,6 +46,7 @@ import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.JournalSet.JournalAndStream;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocols;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
 import org.apache.log4j.Level;
 import org.junit.Test;
@@ -59,7 +59,7 @@ import org.mockito.stubbing.Answer;
  */
 public class TestEditLogRace {
   static {
-    ((Log4JLogger)FSEditLog.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(FSEditLog.LOG, Level.ALL);
   }
 
   private static final Log LOG = LogFactory.getLog(TestEditLogRace.class);
@@ -291,7 +291,7 @@ public class TestEditLogRace {
 
 
         LOG.info("Save " + i + ": saving namespace");
-        namesystem.saveNamespace();
+        namesystem.saveNamespace(0, 0);
         LOG.info("Save " + i + ": leaving safemode");
 
         long savedImageTxId = fsimage.getStorage().getMostRecentCheckpointTxId();
@@ -421,7 +421,7 @@ public class TestEditLogRace {
       assertTrue(et - st > (BLOCK_TIME - 1)*1000);
 
       // Once we're in safe mode, save namespace.
-      namesystem.saveNamespace();
+      namesystem.saveNamespace(0, 0);
 
       LOG.info("Joining on edit thread...");
       doAnEditThread.join();
@@ -458,8 +458,8 @@ public class TestEditLogRace {
     try {
       FSImage fsimage = namesystem.getFSImage();
       FSEditLog editLog = spy(fsimage.getEditLog());
-      fsimage.editLog = editLog;
-      
+      DFSTestUtil.setEditLogForTesting(namesystem, editLog);
+
       final AtomicReference<Throwable> deferredException =
           new AtomicReference<Throwable>();
       final CountDownLatch waitToEnterSync = new CountDownLatch(1);
@@ -515,7 +515,7 @@ public class TestEditLogRace {
       assertTrue(et - st > (BLOCK_TIME - 1)*1000);
 
       // Once we're in safe mode, save namespace.
-      namesystem.saveNamespace();
+      namesystem.saveNamespace(0, 0);
 
       LOG.info("Joining on edit thread...");
       doAnEditThread.join();

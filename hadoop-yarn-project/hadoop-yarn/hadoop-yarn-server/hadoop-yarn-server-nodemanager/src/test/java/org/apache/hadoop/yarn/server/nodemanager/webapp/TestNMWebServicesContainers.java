@@ -32,8 +32,10 @@ import javax.ws.rs.core.MediaType;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 
+import com.sun.jersey.api.client.filter.LoggingFilter;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.util.NodeHealthScriptRunner;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -51,6 +53,7 @@ import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
+import org.apache.hadoop.yarn.webapp.JerseyTestBase;
 import org.apache.hadoop.yarn.webapp.WebApp;
 import org.apache.hadoop.yarn.webapp.WebServicesTestUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -73,10 +76,9 @@ import com.sun.jersey.api.client.ClientResponse.Status;
 import com.sun.jersey.api.client.UniformInterfaceException;
 import com.sun.jersey.api.client.WebResource;
 import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
-import com.sun.jersey.test.framework.JerseyTest;
 import com.sun.jersey.test.framework.WebAppDescriptor;
 
-public class TestNMWebServicesContainers extends JerseyTest {
+public class TestNMWebServicesContainers extends JerseyTestBase {
 
   private static Context nmContext;
   private static ResourceView resourceView;
@@ -123,7 +125,9 @@ public class TestNMWebServicesContainers extends JerseyTest {
       };
       conf.set(YarnConfiguration.NM_LOCAL_DIRS, testRootDir.getAbsolutePath());
       conf.set(YarnConfiguration.NM_LOG_DIRS, testLogDir.getAbsolutePath());
-      NodeHealthCheckerService healthChecker = new NodeHealthCheckerService();
+      LocalDirsHandlerService dirsHandler = new LocalDirsHandlerService();
+      NodeHealthCheckerService healthChecker = new NodeHealthCheckerService(
+          NodeManager.getNodeHealthScriptRunner(conf), dirsHandler);
       healthChecker.init(conf);
       dirsHandler = healthChecker.getDiskHandler();
       aclsManager = new ApplicationACLsManager(conf);
@@ -242,6 +246,7 @@ public class TestNMWebServicesContainers extends JerseyTest {
     Application app2 = new MockApp(2);
     nmContext.getApplications().put(app2.getAppId(), app2);
     addAppContainers(app2);
+    client().addFilter(new LoggingFilter());
 
     ClientResponse response = r.path("ws").path("v1").path("node").path(path)
         .accept(media).get(ClientResponse.class);
@@ -409,6 +414,7 @@ public class TestNMWebServicesContainers extends JerseyTest {
     Application app2 = new MockApp(2);
     nmContext.getApplications().put(app2.getAppId(), app2);
     addAppContainers(app2);
+    client().addFilter(new LoggingFilter(System.out));
 
     for (String id : hash.keySet()) {
       ClientResponse response = r.path("ws").path("v1").path("node")
@@ -468,12 +474,16 @@ public class TestNMWebServicesContainers extends JerseyTest {
           WebServicesTestUtils.getXmlInt(element, "totalMemoryNeededMB"),
           WebServicesTestUtils.getXmlInt(element, "totalVCoresNeeded"),
           WebServicesTestUtils.getXmlString(element, "containerLogsLink"));
+      // verify that the container log files element exists
+      assertTrue("containerLogFiles missing",
+          WebServicesTestUtils.getXmlString(element, "containerLogFiles")
+              != null);
     }
   }
 
   public void verifyNodeContainerInfo(JSONObject info, Container cont)
       throws JSONException, Exception {
-    assertEquals("incorrect number of elements", 9, info.length());
+    assertEquals("incorrect number of elements", 10, info.length());
 
     verifyNodeContainerInfoGeneric(cont, info.getString("id"),
         info.getString("state"), info.getString("user"),
@@ -481,6 +491,9 @@ public class TestNMWebServicesContainers extends JerseyTest {
         info.getString("nodeId"), info.getInt("totalMemoryNeededMB"),
         info.getInt("totalVCoresNeeded"),
         info.getString("containerLogsLink"));
+    // verify that the container log files element exists
+    assertTrue("containerLogFiles missing",
+        info.getJSONArray("containerLogFiles") != null);
   }
 
   public void verifyNodeContainerInfoGeneric(Container cont, String id,
@@ -511,5 +524,4 @@ public class TestNMWebServicesContainers extends JerseyTest {
             cont.getUser());
     assertTrue("containerLogsLink wrong", logsLink.contains(shortLink));
   }
-
 }

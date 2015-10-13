@@ -18,18 +18,29 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
-import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.server.namenode.Namesystem;
 import org.apache.hadoop.hdfs.server.protocol.StorageReport;
+import org.apache.hadoop.hdfs.server.protocol.VolumeFailureSummary;
 import org.apache.hadoop.util.Daemon;
+import org.apache.hadoop.util.StopWatch;
 import org.apache.hadoop.util.Time;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Manage the heartbeats received from datanodes.
@@ -37,7 +48,7 @@ import org.apache.hadoop.util.Time;
  * by the heartbeat manager lock.
  */
 class HeartbeatManager implements DatanodeStatistics {
-  static final Log LOG = LogFactory.getLog(HeartbeatManager.class);
+  static final Logger LOG = LoggerFactory.getLogger(HeartbeatManager.class);
 
   /**
    * Stores a subset of the datanodeMap in DatanodeManager,
@@ -55,8 +66,8 @@ class HeartbeatManager implements DatanodeStatistics {
   private final long heartbeatRecheckInterval;
   /** Heartbeat monitor thread */
   private final Daemon heartbeatThread = new Daemon(new Monitor());
+  private final StopWatch heartbeatStopWatch = new StopWatch();
 
-    
   final Namesystem namesystem;
   final BlockManager blockManager;
 
@@ -114,7 +125,7 @@ class HeartbeatManager implements DatanodeStatistics {
 
   @Override
   public synchronized float getCapacityUsedPercent() {
-    return DFSUtil.getPercentUsed(stats.capacityUsed, stats.capacityTotal);
+    return DFSUtilClient.getPercentUsed(stats.capacityUsed, stats.capacityTotal);
   }
 
   @Override
@@ -124,8 +135,8 @@ class HeartbeatManager implements DatanodeStatistics {
 
   @Override
   public synchronized float getCapacityRemainingPercent() {
-    return DFSUtil.getPercentRemaining(
-        stats.capacityRemaining, stats.capacityTotal);
+    return DFSUtilClient.getPercentRemaining(stats.capacityRemaining,
+                                             stats.capacityTotal);
   }
 
   @Override
@@ -135,7 +146,8 @@ class HeartbeatManager implements DatanodeStatistics {
 
   @Override
   public synchronized float getPercentBlockPoolUsed() {
-    return DFSUtil.getPercentUsed(stats.blockPoolUsed, stats.capacityTotal);
+    return DFSUtilClient.getPercentUsed(stats.blockPoolUsed,
+                                        stats.capacityTotal);
   }
 
   @Override
@@ -187,12 +199,17 @@ class HeartbeatManager implements DatanodeStatistics {
     return stats.expiredHeartbeats;
   }
 
+  @Override
+  public  Map<StorageType, StorageTypeStats> getStorageTypeStats() {
+    return stats.statsMap.get();
+  }
+
   synchronized void register(final DatanodeDescriptor d) {
     if (!d.isAlive) {
       addDatanode(d);
 
       //update its timestamp
-      d.updateHeartbeatState(StorageReport.EMPTY_ARRAY, 0L, 0L, 0, 0);
+      d.updateHeartbeatState(StorageReport.EMPTY_ARRAY, 0L, 0L, 0, 0, null);
     }
   }
 
@@ -217,25 +234,48 @@ class HeartbeatManager implements DatanodeStatistics {
 
   synchronized void updateHeartbeat(final DatanodeDescriptor node,
       StorageReport[] reports, long cacheCapacity, long cacheUsed,
-      int xceiverCount, int failedVolumes) {
+      int xceiverCount, int failedVolumes,
+      VolumeFailureSummary volumeFailureSummary) {
     stats.subtract(node);
     node.updateHeartbeat(reports, cacheCapacity, cacheUsed,
-      xceiverCount, failedVolumes);
+      xceiverCount, failedVolumes, volumeFailureSummary);
     stats.add(node);
   }
 
   synchronized void startDecommission(final DatanodeDescriptor node) {
-    stats.subtract(node);
-    node.startDecommission();
-    stats.add(node);
+    if (!node.isAlive) {
+      LOG.info("Dead node {} is decommissioned immediately.", node);
+      node.setDecommissioned();
+    } else {
+      stats.subtract(node);
+      node.startDecommission();
+      stats.add(node);
+    }
   }
 
   synchronized void stopDecommission(final DatanodeDescriptor node) {
-    stats.subtract(node);
-    node.stopDecommission();
-    stats.add(node);
+    LOG.info("Stopping decommissioning of {} node {}",
+        node.isAlive ? "live" : "dead", node);
+    if (!node.isAlive) {
+      node.stopDecommission();
+    } else {
+      stats.subtract(node);
+      node.stopDecommission();
+      stats.add(node);
+    }
   }
-  
+
+  @VisibleForTesting
+  void restartHeartbeatStopWatch() {
+    heartbeatStopWatch.reset().start();
+  }
+
+  @VisibleForTesting
+  boolean shouldAbortHeartbeatCheck(long offset) {
+    long elapsed = heartbeatStopWatch.now(TimeUnit.MILLISECONDS);
+    return elapsed + offset > heartbeatRecheckInterval;
+  }
+
   /**
    * Check if there are any expired heartbeats, and if so,
    * whether any blocks have to be re-replicated.
@@ -282,6 +322,10 @@ class HeartbeatManager implements DatanodeStatistics {
       int numOfStaleStorages = 0;
       synchronized(this) {
         for (DatanodeDescriptor d : datanodes) {
+          // check if an excessive GC pause has occurred
+          if (shouldAbortHeartbeatCheck(0)) {
+            return;
+          }
           if (dead == null && dm.isDatanodeDead(d)) {
             stats.incrExpiredHeartbeats();
             dead = d;
@@ -350,8 +394,9 @@ class HeartbeatManager implements DatanodeStatistics {
     @Override
     public void run() {
       while(namesystem.isRunning()) {
+        restartHeartbeatStopWatch();
         try {
-          final long now = Time.now();
+          final long now = Time.monotonicNow();
           if (lastHeartbeatCheck + heartbeatRecheckInterval < now) {
             heartbeatCheck();
             lastHeartbeatCheck = now;
@@ -371,6 +416,12 @@ class HeartbeatManager implements DatanodeStatistics {
           Thread.sleep(5000);  // 5 seconds
         } catch (InterruptedException ie) {
         }
+        // avoid declaring nodes dead for another cycle if a GC pause lasts
+        // longer than the node recheck interval
+        if (shouldAbortHeartbeatCheck(-5000)) {
+          LOG.warn("Skipping next heartbeat scan due to excessive pause");
+          lastHeartbeatCheck = Time.monotonicNow();
+        }
       }
     }
   }
@@ -379,6 +430,9 @@ class HeartbeatManager implements DatanodeStatistics {
    * For decommissioning/decommissioned nodes, only used capacity is counted.
    */
   private static class Stats {
+
+    private final StorageTypeStatsMap statsMap = new StorageTypeStatsMap();
+
     private long capacityTotal = 0L;
     private long capacityUsed = 0L;
     private long capacityRemaining = 0L;
@@ -406,6 +460,14 @@ class HeartbeatManager implements DatanodeStatistics {
       }
       cacheCapacity += node.getCacheCapacity();
       cacheUsed += node.getCacheUsed();
+      Set<StorageType> storageTypes = new HashSet<>();
+      for (DatanodeStorageInfo storageInfo : node.getStorageInfos()) {
+        statsMap.addStorage(storageInfo, node);
+        storageTypes.add(storageInfo.getStorageType());
+      }
+      for (StorageType storageType : storageTypes) {
+        statsMap.addNode(storageType, node);
+      }
     }
 
     private void subtract(final DatanodeDescriptor node) {
@@ -422,6 +484,14 @@ class HeartbeatManager implements DatanodeStatistics {
       }
       cacheCapacity -= node.getCacheCapacity();
       cacheUsed -= node.getCacheUsed();
+      Set<StorageType> storageTypes = new HashSet<>();
+      for (DatanodeStorageInfo storageInfo : node.getStorageInfos()) {
+        statsMap.subtractStorage(storageInfo, node);
+        storageTypes.add(storageInfo.getStorageType());
+      }
+      for (StorageType storageType : storageTypes) {
+        statsMap.subtractNode(storageType, node);
+      }
     }
     
     /** Increment expired heartbeat counter. */
@@ -429,5 +499,69 @@ class HeartbeatManager implements DatanodeStatistics {
       expiredHeartbeats++;
     }
   }
-}
 
+  /** StorageType specific statistics.
+   * For decommissioning/decommissioned nodes, only used capacity is counted.
+   */
+
+  static final class StorageTypeStatsMap {
+
+    private Map<StorageType, StorageTypeStats> storageTypeStatsMap =
+          new IdentityHashMap<>();
+
+    private StorageTypeStatsMap() {}
+
+    private StorageTypeStatsMap(StorageTypeStatsMap other) {
+      storageTypeStatsMap =
+          new IdentityHashMap<>(other.storageTypeStatsMap);
+      for (Map.Entry<StorageType, StorageTypeStats> entry :
+          storageTypeStatsMap.entrySet()) {
+        entry.setValue(new StorageTypeStats(entry.getValue()));
+      }
+    }
+
+    private Map<StorageType, StorageTypeStats> get() {
+      return Collections.unmodifiableMap(storageTypeStatsMap);
+    }
+
+    private void addNode(StorageType storageType,
+        final DatanodeDescriptor node) {
+      StorageTypeStats storageTypeStats =
+          storageTypeStatsMap.get(storageType);
+      if (storageTypeStats == null) {
+        storageTypeStats = new StorageTypeStats();
+        storageTypeStatsMap.put(storageType, storageTypeStats);
+      }
+      storageTypeStats.addNode(node);
+    }
+
+    private void addStorage(final DatanodeStorageInfo info,
+        final DatanodeDescriptor node) {
+      StorageTypeStats storageTypeStats =
+          storageTypeStatsMap.get(info.getStorageType());
+      if (storageTypeStats == null) {
+        storageTypeStats = new StorageTypeStats();
+        storageTypeStatsMap.put(info.getStorageType(), storageTypeStats);
+      }
+      storageTypeStats.addStorage(info, node);
+    }
+
+    private void subtractStorage(final DatanodeStorageInfo info,
+        final DatanodeDescriptor node) {
+      StorageTypeStats storageTypeStats =
+          storageTypeStatsMap.get(info.getStorageType());
+      if (storageTypeStats != null) {
+        storageTypeStats.subtractStorage(info, node);
+      }
+    }
+
+    private void subtractNode(StorageType storageType,
+        final DatanodeDescriptor node) {
+      StorageTypeStats storageTypeStats =
+          storageTypeStatsMap.get(storageType);
+      if (storageTypeStats != null) {
+        storageTypeStats.subtractNode(node);
+      }
+    }
+  }
+}

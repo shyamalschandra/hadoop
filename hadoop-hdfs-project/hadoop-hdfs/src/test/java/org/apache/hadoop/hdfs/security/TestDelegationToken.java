@@ -30,7 +30,6 @@ import java.net.URI;
 import java.security.PrivilegedExceptionAction;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -45,6 +44,7 @@ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
 import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
+import org.apache.hadoop.hdfs.web.WebHdfsConstants;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.security.AccessControlException;
@@ -52,6 +52,7 @@ import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Assert;
@@ -67,7 +68,6 @@ public class TestDelegationToken {
   @Before
   public void setUp() throws Exception {
     config = new HdfsConfiguration();
-    config.setBoolean(DFSConfigKeys.DFS_WEBHDFS_ENABLED_KEY, true);
     config.setLong(DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_MAX_LIFETIME_KEY, 10000);
     config.setLong(DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_RENEW_INTERVAL_KEY, 5000);
     config.setBoolean(DFSConfigKeys.DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
@@ -169,8 +169,8 @@ public class TestDelegationToken {
   
   @Test
   public void testDelegationTokenWebHdfsApi() throws Exception {
-    ((Log4JLogger)NamenodeWebHdfsMethods.LOG).getLogger().setLevel(Level.ALL);
-    final String uri = WebHdfsFileSystem.SCHEME  + "://"
+    GenericTestUtils.setLogLevel(NamenodeWebHdfsMethods.LOG, Level.ALL);
+    final String uri = WebHdfsConstants.WEBHDFS_SCHEME + "://"
         + config.get(DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY);
     //get file system as JobTracker
     final UserGroupInformation ugi = UserGroupInformation.createUserForTesting(
@@ -313,5 +313,14 @@ public class TestDelegationToken {
             return null;
           }
         });
+  }
+
+  @Test
+  public void testDelegationTokenIdentifierToString() throws Exception {
+    DelegationTokenIdentifier dtId = new DelegationTokenIdentifier(new Text(
+        "SomeUser"), new Text("JobTracker"), null);
+    Assert.assertEquals("HDFS_DELEGATION_TOKEN token 0" +
+        " for SomeUser with renewer JobTracker",
+        dtId.toString());
   }
 }

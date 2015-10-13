@@ -28,7 +28,7 @@ public class NfsConfigKeys {
   
   public static final String DFS_NFS_FILE_DUMP_KEY = "nfs.file.dump";
   public static final boolean DFS_NFS_FILE_DUMP_DEFAULT = true;
-  public static final String DFS_NFS_FILE_DUMP_DIR_KEY = "nfs.file.dump.dir";
+  public static final String DFS_NFS_FILE_DUMP_DIR_KEY = "nfs.dump.dir";
   public static final String DFS_NFS_FILE_DUMP_DIR_DEFAULT = "/tmp/.hdfs-nfs";
   
   public static final String DFS_NFS_MAX_READ_TRANSFER_SIZE_KEY = "nfs.rtmax";
@@ -60,4 +60,30 @@ public class NfsConfigKeys {
   
   public final static String LARGE_FILE_UPLOAD = "nfs.large.file.upload";
   public final static boolean LARGE_FILE_UPLOAD_DEFAULT = true;
+  
+  public static final String NFS_HTTP_PORT_KEY = "nfs.http.port";
+  public static final int NFS_HTTP_PORT_DEFAULT = 50079;
+  public static final String NFS_HTTP_ADDRESS_KEY = "nfs.http.address";
+  public static final String NFS_HTTP_ADDRESS_DEFAULT = "0.0.0.0:" + NFS_HTTP_PORT_DEFAULT;
+
+  public static final String NFS_HTTPS_PORT_KEY = "nfs.https.port";
+  public static final int NFS_HTTPS_PORT_DEFAULT = 50579;
+  public static final String NFS_HTTPS_ADDRESS_KEY = "nfs.https.address";
+  public static final String NFS_HTTPS_ADDRESS_DEFAULT = "0.0.0.0:" + NFS_HTTPS_PORT_DEFAULT;
+  
+  public static final String  NFS_METRICS_PERCENTILES_INTERVALS_KEY = "nfs.metrics.percentiles.intervals";
+  
+  /*
+   * HDFS super-user is the user with the same identity as NameNode process
+   * itself and the super-user can do anything in that permissions checks never
+   * fail for the super-user. If the following property is configured, the
+   * superuser on NFS client can access any file on HDFS. By default, the super
+   * user is not configured in the gateway. Note that, even the the superuser is
+   * configured, "nfs.exports.allowed.hosts" still takes effect. For example,
+   * the superuser will not have write access to HDFS files through the gateway
+   * if the NFS client host is not allowed to have write access in
+   * "nfs.exports.allowed.hosts".
+   */
+  public static final String  NFS_SUPERUSER_KEY = "nfs.superuser";
+  public static final String  NFS_SUPERUSER_DEFAULT = "";
 }

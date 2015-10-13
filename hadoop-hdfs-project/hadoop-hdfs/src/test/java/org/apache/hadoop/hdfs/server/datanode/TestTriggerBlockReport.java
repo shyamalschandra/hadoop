@@ -32,6 +32,8 @@ import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.client.BlockReportOptions;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.FsDatasetSpi;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo;
 import org.apache.hadoop.hdfs.server.protocol.ReceivedDeletedBlockInfo.BlockStatus;
@@ -76,7 +78,8 @@ public final class TestTriggerBlockReport {
       Mockito.verify(spy, times(0)).blockReport(
           any(DatanodeRegistration.class),
           anyString(),
-          any(StorageBlockReport[].class));
+          any(StorageBlockReport[].class),
+          Mockito.<BlockReportContext>anyObject());
       Mockito.verify(spy, times(1)).blockReceivedAndDeleted(
           any(DatanodeRegistration.class),
           anyString(),
@@ -89,9 +92,12 @@ public final class TestTriggerBlockReport {
         new Block(5678, 512, 1000),  BlockStatus.DELETED_BLOCK, null);
     DataNode datanode = cluster.getDataNodes().get(0);
     BPServiceActor actor =
-        datanode.getAllBpOs()[0].getBPServiceActors().get(0);
-    String storageUuid =
-        datanode.getFSDataset().getVolumes().get(0).getStorageID();
+        datanode.getAllBpOs().get(0).getBPServiceActors().get(0);
+    String storageUuid;
+    try (FsDatasetSpi.FsVolumeReferences volumes =
+        datanode.getFSDataset().getFsVolumeReferences()) {
+      storageUuid = volumes.get(0).getStorageID();
+    }
     actor.notifyNamenodeDeletedBlock(rdbi, storageUuid);
 
     // Manually trigger a block report.
@@ -113,7 +119,8 @@ public final class TestTriggerBlockReport {
       Mockito.verify(spy, timeout(60000)).blockReport(
           any(DatanodeRegistration.class),
           anyString(),
-          any(StorageBlockReport[].class));
+          any(StorageBlockReport[].class),
+          Mockito.<BlockReportContext>anyObject());
     }
 
     cluster.shutdown();

@@ -33,6 +33,11 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
 
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.GnuParser;
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.Options;
+import org.apache.commons.cli.Parser;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -68,6 +73,7 @@ import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 
+import com.google.common.base.Charsets;
 
 /**
  * a archive creation utility.
@@ -80,6 +86,10 @@ public class HadoopArchives implements Tool {
   private static final Log LOG = LogFactory.getLog(HadoopArchives.class);
   
   private static final String NAME = "har"; 
+  private static final String ARCHIVE_NAME = "archiveName";
+  private static final String REPLICATION = "r";
+  private static final String PARENT_PATH = "p";
+  private static final String HELP = "help";
   static final String SRC_LIST_LABEL = NAME + ".src.list";
   static final String DST_DIR_LABEL = NAME + ".dest.path";
   static final String TMP_DIR_LABEL = NAME + ".tmp.dir";
@@ -90,19 +100,21 @@ public class HadoopArchives implements Tool {
   static final String SRC_PARENT_LABEL = NAME + ".parent.path";
   /** the size of the blocks that will be created when archiving **/
   static final String HAR_BLOCKSIZE_LABEL = NAME + ".block.size";
-  /**the size of the part files that will be created when archiving **/
+  /** the replication factor for the file in archiving. **/
+  static final String HAR_REPLICATION_LABEL = NAME + ".replication.factor";
+  /** the size of the part files that will be created when archiving **/
   static final String HAR_PARTSIZE_LABEL = NAME + ".partfile.size";
 
   /** size of each part file size **/
   long partSize = 2 * 1024 * 1024 * 1024l;
   /** size of blocks in hadoop archives **/
   long blockSize = 512 * 1024 * 1024l;
-  /** the desired replication degree; default is 10 **/
-  short repl = 10;
+  /** the desired replication degree; default is 3 **/
+  short repl = 3;
 
   private static final String usage = "archive"
-  + " -archiveName <NAME>.har -p <parent path> [-r <replication factor>]" +
-      "<src>* <dest>" +
+  + " <-archiveName <NAME>.har> <-p <parent path>> [-r <replication factor>]" +
+      " <src>* <dest>" +
   "\n";
   
  
@@ -237,7 +249,6 @@ public class HadoopArchives implements Tool {
       ArrayList<FileSplit> splits = new ArrayList<FileSplit>(numSplits);
       LongWritable key = new LongWritable();
       final HarEntry value = new HarEntry();
-      SequenceFile.Reader reader = null;
       // the remaining bytes in the file split
       long remaining = fstatus.getLen();
       // the count of sizes calculated till now
@@ -249,8 +260,7 @@ public class HadoopArchives implements Tool {
       long targetSize = totalSize/numSplits;
       // create splits of size target size so that all the maps 
       // have equals sized data to read and write to.
-      try {
-        reader = new SequenceFile.Reader(fs, src, jconf);
+      try (SequenceFile.Reader reader = new SequenceFile.Reader(fs, src, jconf)) {
         while(reader.next(key, value)) {
           if (currentCount + key.get() > targetSize && currentCount != 0){
             long size = lastPos - startPos;
@@ -266,9 +276,6 @@ public class HadoopArchives implements Tool {
         if (remaining != 0) {
           splits.add(new FileSplit(src, startPos, remaining, (String[])null));
         }
-      }
-      finally { 
-        reader.close();
       }
       return splits.toArray(new FileSplit[splits.size()]);
     }
@@ -470,11 +477,17 @@ public class HadoopArchives implements Tool {
     conf.setLong(HAR_PARTSIZE_LABEL, partSize);
     conf.set(DST_HAR_LABEL, archiveName);
     conf.set(SRC_PARENT_LABEL, parentPath.makeQualified(fs).toString());
+    conf.setInt(HAR_REPLICATION_LABEL, repl);
     Path outputPath = new Path(dest, archiveName);
     FileOutputFormat.setOutputPath(conf, outputPath);
     FileSystem outFs = outputPath.getFileSystem(conf);
-    if (outFs.exists(outputPath) || outFs.isFile(dest)) {
-      throw new IOException("Invalid Output: " + outputPath);
+    if (outFs.exists(outputPath)) {
+      throw new IOException("Archive path: "
+          + outputPath.toString() + " already exists");
+    }
+    if (outFs.isFile(dest)) {
+      throw new IOException("Destination " + dest.toString()
+          + " should be a directory but is a file");
     }
     conf.set(DST_DIR_LABEL, outputPath.toString());
     Path stagingArea;
@@ -539,8 +552,6 @@ public class HadoopArchives implements Tool {
     } finally {
       srcWriter.close();
     }
-    //increase the replication of src files
-    jobfs.setReplication(srcFiles, repl);
     conf.setInt(SRC_COUNT_LABEL, numFiles);
     conf.setLong(TOTAL_SIZE_LABEL, totalSize);
     int numMaps = (int)(totalSize/partSize);
@@ -577,6 +588,7 @@ public class HadoopArchives implements Tool {
     FileSystem destFs = null;
     byte[] buffer;
     int buf_size = 128 * 1024;
+    private int replication = 3;
     long blockSize = 512 * 1024 * 1024l;
 
     // configure the mapper and create 
@@ -585,7 +597,7 @@ public class HadoopArchives implements Tool {
     // tmp files. 
     public void configure(JobConf conf) {
       this.conf = conf;
-
+      replication = conf.getInt(HAR_REPLICATION_LABEL, 3);
       // this is tightly tied to map reduce
       // since it does not expose an api 
       // to get the partition
@@ -702,6 +714,7 @@ public class HadoopArchives implements Tool {
     public void close() throws IOException {
       // close the part files.
       partStream.close();
+      destFs.setReplication(tmpOutput, (short) replication);
     }
   }
   
@@ -722,6 +735,7 @@ public class HadoopArchives implements Tool {
     private int numIndexes = 1000;
     private Path tmpOutputDir = null;
     private int written = 0;
+    private int replication = 3;
     private int keyVal = 0;
     
     // configure 
@@ -730,6 +744,7 @@ public class HadoopArchives implements Tool {
       tmpOutputDir = FileOutputFormat.getWorkOutputPath(this.conf);
       masterIndex = new Path(tmpOutputDir, "_masterindex");
       index = new Path(tmpOutputDir, "_index");
+      replication = conf.getInt(HAR_REPLICATION_LABEL, 3);
       try {
         fs = masterIndex.getFileSystem(conf);
         if (fs.exists(masterIndex)) {
@@ -741,7 +756,7 @@ public class HadoopArchives implements Tool {
         indexStream = fs.create(index);
         outStream = fs.create(masterIndex);
         String version = VERSION + " \n";
-        outStream.write(version.getBytes());
+        outStream.write(version.getBytes(Charsets.UTF_8));
         
       } catch(IOException e) {
         throw new RuntimeException(e);
@@ -760,7 +775,7 @@ public class HadoopArchives implements Tool {
       while(values.hasNext()) {
         Text value = values.next();
         String towrite = value.toString() + "\n";
-        indexStream.write(towrite.getBytes());
+        indexStream.write(towrite.getBytes(Charsets.UTF_8));
         written++;
         if (written > numIndexes -1) {
           // every 1000 indexes we report status
@@ -769,7 +784,7 @@ public class HadoopArchives implements Tool {
           endIndex = keyVal;
           String masterWrite = startIndex + " " + endIndex + " " + startPos 
                               +  " " + indexStream.getPos() + " \n" ;
-          outStream.write(masterWrite.getBytes());
+          outStream.write(masterWrite.getBytes(Charsets.UTF_8));
           startPos = indexStream.getPos();
           startIndex = endIndex;
           written = 0;
@@ -782,18 +797,28 @@ public class HadoopArchives implements Tool {
       if (written > 0) {
         String masterWrite = startIndex + " " + keyVal + " " + startPos  +
                              " " + indexStream.getPos() + " \n";
-        outStream.write(masterWrite.getBytes());
+        outStream.write(masterWrite.getBytes(Charsets.UTF_8));
       }
       // close the streams
       outStream.close();
       indexStream.close();
       // try increasing the replication 
-      fs.setReplication(index, (short) 5);
-      fs.setReplication(masterIndex, (short) 5);
+      fs.setReplication(index, (short) replication);
+      fs.setReplication(masterIndex, (short) replication);
     }
     
   }
-  
+
+  private void printUsage(Options opts, boolean printDetailed) {
+    HelpFormatter helpFormatter = new HelpFormatter();
+    if (printDetailed) {
+      helpFormatter.printHelp(usage.length() + 10, usage, null, opts, null,
+          false);
+    } else {
+      System.out.println(usage);
+    }
+  }
+
   /** the main driver for creating the archives
    *  it takes at least three command line parameters. The parent path, 
    *  The src and the dest. It does an lsr on the source paths.
@@ -803,43 +828,51 @@ public class HadoopArchives implements Tool {
 
   public int run(String[] args) throws Exception {
     try {
-      Path parentPath = null;
-      List<Path> srcPaths = new ArrayList<Path>();
-      Path destPath = null;
-      String archiveName = null;
-      if (args.length < 5) {
-        System.out.println(usage);
-        throw new IOException("Invalid usage.");
+      // Parse CLI options
+      Options options = new Options();
+      options.addOption(ARCHIVE_NAME, true,
+          "Name of the Archive. This is mandatory option");
+      options.addOption(PARENT_PATH, true,
+          "Parent path of sources. This is mandatory option");
+      options.addOption(REPLICATION, true, "Replication factor archive files");
+      options.addOption(HELP, false, "Show the usage");
+      Parser parser = new GnuParser();
+      CommandLine commandLine = parser.parse(options, args, true);
+
+      if (commandLine.hasOption(HELP)) {
+        printUsage(options, true);
+        return 0;
       }
-      if (!"-archiveName".equals(args[0])) {
-        System.out.println(usage);
+      if (!commandLine.hasOption(ARCHIVE_NAME)) {
+        printUsage(options, false);
         throw new IOException("Archive Name not specified.");
       }
-      archiveName = args[1];
+      String archiveName = commandLine.getOptionValue(ARCHIVE_NAME);
       if (!checkValidName(archiveName)) {
-        System.out.println(usage);
+        printUsage(options, false);
         throw new IOException("Invalid name for archives. " + archiveName);
       }
-      int i = 2;
       //check to see if relative parent has been provided or not
       //this is a required parameter. 
-      if (! "-p".equals(args[i])) {
-        System.out.println(usage);
+      if (!commandLine.hasOption(PARENT_PATH)) {
+        printUsage(options, false);
         throw new IOException("Parent path not specified.");
       }
-      parentPath = new Path(args[i+1]);
+      Path parentPath = new Path(commandLine.getOptionValue(PARENT_PATH));
       if (!parentPath.isAbsolute()) {
-        parentPath= parentPath.getFileSystem(getConf()).makeQualified(parentPath);
+        parentPath = parentPath.getFileSystem(getConf()).makeQualified(
+            parentPath);
       }
 
-      i+=2;
-
-      if ("-r".equals(args[i])) {
-        repl = Short.parseShort(args[i+1]);
-        i+=2;
+      if (commandLine.hasOption(REPLICATION)) {
+        repl = Short.parseShort(commandLine.getOptionValue(REPLICATION));
       }
+      // Remaining args
+      args = commandLine.getArgs();
+      List<Path> srcPaths = new ArrayList<Path>();
+      Path destPath = null;
       //read the rest of the paths
-      for (; i < args.length; i++) {
+      for (int i = 0; i < args.length; i++) {
         if (i == (args.length - 1)) {
           destPath = new Path(args[i]);
           if (!destPath.isAbsolute()) {
@@ -849,12 +882,16 @@ public class HadoopArchives implements Tool {
         else {
           Path argPath = new Path(args[i]);
           if (argPath.isAbsolute()) {
-            System.out.println(usage);
-            throw new IOException("source path " + argPath +
-                " is not relative  to "+ parentPath);
+            printUsage(options, false);
+            throw new IOException("Source path " + argPath +
+                " is not relative to "+ parentPath);
           }
           srcPaths.add(new Path(parentPath, argPath));
         }
+      }
+      if (destPath == null) {
+        printUsage(options, false);
+        throw new IOException("Destination path not specified.");
       }
       if (srcPaths.size() == 0) {
         // assuming if the user does not specify path for sources

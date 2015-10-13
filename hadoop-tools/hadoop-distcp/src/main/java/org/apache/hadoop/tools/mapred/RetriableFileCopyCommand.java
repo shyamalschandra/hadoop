@@ -84,8 +84,7 @@ public class RetriableFileCopyCommand extends RetriableCommand {
    * This is the actual copy-implementation.
    * @param arguments Argument-list to the command.
    * @return Number of bytes copied.
-   * @throws Exception: CopyReadException, if there are read-failures. All other
-   *         failures are IOExceptions.
+   * @throws Exception
    */
   @SuppressWarnings("unchecked")
   @Override
@@ -294,7 +293,7 @@ public class RetriableFileCopyCommand extends RetriableCommand {
       Configuration conf) throws IOException {
     try {
       FileSystem fs = path.getFileSystem(conf);
-      long bandwidthMB = conf.getInt(DistCpConstants.CONF_LABEL_BANDWIDTH_MB,
+      float bandwidthMB = conf.getFloat(DistCpConstants.CONF_LABEL_BANDWIDTH_MB,
               DistCpConstants.DEFAULT_BANDWIDTH_MB);
       FSDataInputStream in = fs.open(path);
       return new ThrottledInputStream(in, bandwidthMB * 1024 * 1024);

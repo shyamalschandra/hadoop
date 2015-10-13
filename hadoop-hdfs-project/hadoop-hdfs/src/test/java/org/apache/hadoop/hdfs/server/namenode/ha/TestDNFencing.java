@@ -24,21 +24,22 @@ import java.io.PrintWriter;
 import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 
+import com.google.common.base.Supplier;
+import com.google.common.collect.Lists;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
-import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.protocolPB.DatanodeProtocolClientSideTranslatorPB;
@@ -50,9 +51,9 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockPlacementPolicyDefault
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
-import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.protocol.BlockReportContext;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeRegistration;
 import org.apache.hadoop.hdfs.server.protocol.StorageBlockReport;
 import org.apache.hadoop.io.IOUtils;
@@ -64,9 +65,6 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
-
-import com.google.common.base.Supplier;
-import com.google.common.collect.Lists;
 
 
 public class TestDNFencing {
@@ -82,9 +80,7 @@ public class TestDNFencing {
   private FileSystem fs;
 
   static {
-    ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LogFactory.getLog(BlockManager.class)).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
   }
   
   @Before
@@ -155,17 +151,18 @@ public class TestDNFencing {
     banner("NN2 Metadata immediately after failover");
     doMetasave(nn2);
     
-    // Even though NN2 considers the blocks over-replicated, it should
-    // post-pone the block invalidation because the DNs are still "stale".
-    assertEquals(30, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
-    
     banner("Triggering heartbeats and block reports so that fencing is completed");
     cluster.triggerHeartbeats();
     cluster.triggerBlockReports();
     
     banner("Metadata after nodes have all block-reported");
     doMetasave(nn2);
-    
+
+    // Force a rescan of postponedMisreplicatedBlocks.
+    BlockManager nn2BM = nn2.getNamesystem().getBlockManager();
+    BlockManagerTestUtil.checkHeartbeat(nn2BM);
+    BlockManagerTestUtil.rescanPostponedMisreplicatedBlocks(nn2BM);
+
     // The blocks should no longer be postponed.
     assertEquals(0, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
     
@@ -251,7 +248,12 @@ public class TestDNFencing {
     
     banner("Metadata after nodes have all block-reported");
     doMetasave(nn2);
-    
+
+    // Force a rescan of postponedMisreplicatedBlocks.
+    BlockManager nn2BM = nn2.getNamesystem().getBlockManager();
+    BlockManagerTestUtil.checkHeartbeat(nn2BM);
+    BlockManagerTestUtil.rescanPostponedMisreplicatedBlocks(nn2BM);
+
     // The block should no longer be postponed.
     assertEquals(0, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
     
@@ -347,6 +349,11 @@ public class TestDNFencing {
     banner("Metadata after nodes have all block-reported");
     doMetasave(nn2);
     
+    // Force a rescan of postponedMisreplicatedBlocks.
+    BlockManager nn2BM = nn2.getNamesystem().getBlockManager();
+    BlockManagerTestUtil.checkHeartbeat(nn2BM);
+    BlockManagerTestUtil.rescanPostponedMisreplicatedBlocks(nn2BM);
+
     // The block should no longer be postponed.
     assertEquals(0, nn2.getNamesystem().getPostponedMisreplicatedBlocks());
     
@@ -537,7 +544,8 @@ public class TestDNFencing {
         .when(spy).blockReport(
           Mockito.<DatanodeRegistration>anyObject(),
           Mockito.anyString(),
-          Mockito.<StorageBlockReport[]>anyObject());
+          Mockito.<StorageBlockReport[]>anyObject(),
+          Mockito.<BlockReportContext>anyObject());
       dn.scheduleAllBlockReport(0);
       delayer.waitForCall();
       
@@ -632,7 +640,7 @@ public class TestDNFencing {
       Collection<DatanodeStorageInfo> chooseFrom = !first.isEmpty() ? first : second;
 
       List<DatanodeStorageInfo> l = Lists.newArrayList(chooseFrom);
-      return l.get(DFSUtil.getRandom().nextInt(l.size()));
+      return l.get(ThreadLocalRandom.current().nextInt(l.size()));
     }
   }
 

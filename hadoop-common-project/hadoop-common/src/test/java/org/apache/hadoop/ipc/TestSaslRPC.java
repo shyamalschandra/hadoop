@@ -181,7 +181,7 @@ public class TestSaslRPC {
     StringBuilder sb = new StringBuilder();
     int i = 0;
     for (QualityOfProtection qop:qops){
-     sb.append(qop.name().toLowerCase());
+     sb.append(org.apache.hadoop.util.StringUtils.toLowerCase(qop.name()));
      if (++i < qops.length){
        sb.append(",");
      }
@@ -558,9 +558,16 @@ public class TestSaslRPC {
       e = se;
     }
     assertNotNull(e);
-    assertEquals("PLAIN auth failed: wrong password", e.getMessage());
+    String message = e.getMessage();
+    assertContains("PLAIN auth failed", message);
+    assertContains("wrong password", message);
   }
 
+  private void assertContains(String expected, String text) {
+    assertNotNull("null text", text );
+    assertTrue("No {" + expected + "} in {" + text + "}",
+        text.contains(expected));
+  }
 
   private void runNegotiation(CallbackHandler clientCbh,
                               CallbackHandler serverCbh)

@@ -25,6 +25,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.Charset;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -40,8 +41,6 @@ import java.util.regex.Pattern;
 
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.exception.ExceptionUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
@@ -60,12 +59,12 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.permission.PermissionStatus;
 import org.apache.hadoop.fs.azure.AzureException;
 import org.apache.hadoop.fs.azure.StorageInterface.CloudBlobWrapper;
-import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Progressable;
 
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.codehaus.jackson.JsonNode;
 import org.codehaus.jackson.JsonParseException;
 import org.codehaus.jackson.JsonParser;
@@ -73,19 +72,17 @@ import org.codehaus.jackson.map.JsonMappingException;
 import org.codehaus.jackson.map.ObjectMapper;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.microsoft.windowsazure.storage.AccessCondition;
-import com.microsoft.windowsazure.storage.OperationContext;
-import com.microsoft.windowsazure.storage.StorageException;
-import com.microsoft.windowsazure.storage.blob.CloudBlob;
-import com.microsoft.windowsazure.storage.core.*;
+import com.microsoft.azure.storage.AccessCondition;
+import com.microsoft.azure.storage.OperationContext;
+import com.microsoft.azure.storage.StorageException;
+import com.microsoft.azure.storage.blob.CloudBlob;
+import com.microsoft.azure.storage.core.*;
 
 /**
- * <p>
  * A {@link FileSystem} for reading and writing files stored on <a
  * href="http://store.azure.com/">Windows Azure</a>. This implementation is
  * blob-based and stores files on Azure in their native form so they can be read
  * by other Azure tools.
- * </p>
  */
 @InterfaceAudience.Public
 @InterfaceStability.Stable
@@ -153,7 +150,7 @@ public class NativeAzureFileSystem extends FileSystem {
             "Error reading pending rename file contents -- "
                 + "maximum file size exceeded");
       }
-      String contents = new String(bytes, 0, l);
+      String contents = new String(bytes, 0, l, Charset.forName("UTF-8"));
 
       // parse the JSON
       ObjectMapper objMapper = new ObjectMapper();
@@ -175,8 +172,8 @@ public class NativeAzureFileSystem extends FileSystem {
       }
       
       if (!this.committed) {
-        LOG.error("Deleting corruped rename pending file "
-            + redoFile + "\n" + contents);
+        LOG.error("Deleting corruped rename pending file {} \n {}",
+            redoFile, contents);
 
         // delete the -RenamePending.json file
         fs.delete(redoFile, false);
@@ -217,9 +214,11 @@ public class NativeAzureFileSystem extends FileSystem {
     }
 
     /**
-     * Write to disk the information needed to redo folder rename, in JSON format.
-     * The file name will be wasb://<sourceFolderPrefix>/folderName-RenamePending.json
+     * Write to disk the information needed to redo folder rename,
+     * in JSON format. The file name will be
+     * {@code wasb://<sourceFolderPrefix>/folderName-RenamePending.json}
      * The file format will be:
+     * <pre>{@code
      * {
      *   FormatVersion: "1.0",
      *   OperationTime: "<YYYY-MM-DD HH:MM:SS.MMM>",
@@ -238,14 +237,12 @@ public class NativeAzureFileSystem extends FileSystem {
      *    "innerFile",
      *    "innerFile2"
      *  ]
-     * }
+     * } }</pre>
      * @throws IOException
      */
     public void writeFile(FileSystem fs) throws IOException {
       Path path = getRenamePendingFilePath();
-      if (LOG.isDebugEnabled()){
-        LOG.debug("Preparing to write atomic rename state to " + path.toString());
-      }
+      LOG.debug("Preparing to write atomic rename state to {}", path.toString());
       OutputStream output = null;
 
       String contents = makeRenamePendingFileContents();
@@ -253,12 +250,12 @@ public class NativeAzureFileSystem extends FileSystem {
       // Write file.
       try {
         output = fs.create(path);
-        output.write(contents.getBytes());
+        output.write(contents.getBytes(Charset.forName("UTF-8")));
       } catch (IOException e) {
         throw new IOException("Unable to write RenamePending file for folder rename from "
             + srcKey + " to " + dstKey, e);
       } finally {
-        IOUtils.cleanup(LOG, output);
+        NativeAzureFileSystem.cleanup(LOG, output);
       }
     }
 
@@ -288,8 +285,8 @@ public class NativeAzureFileSystem extends FileSystem {
             MAX_RENAME_PENDING_FILE_SIZE - FORMATTING_BUFFER) {
 
           // Give up now to avoid using too much memory.
-          LOG.error("Internal error: Exceeded maximum rename pending file size of "
-              + MAX_RENAME_PENDING_FILE_SIZE + " bytes.");
+          LOG.error("Internal error: Exceeded maximum rename pending file size of {} bytes.",
+              MAX_RENAME_PENDING_FILE_SIZE);
 
           // return some bad JSON with an error message to make it human readable
           return "exceeded maximum rename pending file size";
@@ -601,7 +598,7 @@ public class NativeAzureFileSystem extends FileSystem {
     }
   }
 
-  public static final Log LOG = LogFactory.getLog(NativeAzureFileSystem.class);
+  public static final Logger LOG = LoggerFactory.getLogger(NativeAzureFileSystem.class);
 
   static final String AZURE_BLOCK_SIZE_PROPERTY_NAME = "fs.azure.block.size";
   /**
@@ -694,18 +691,27 @@ public class NativeAzureFileSystem extends FileSystem {
      */
     @Override
     public synchronized int read() throws IOException {
-      int result = 0;
-      result = in.read();
-      if (result != -1) {
-        pos++;
-        if (statistics != null) {
-          statistics.incrementBytesRead(1);
+      try {
+        int result = 0;
+        result = in.read();
+        if (result != -1) {
+          pos++;
+          if (statistics != null) {
+            statistics.incrementBytesRead(1);
+          }
         }
-      }
-
       // Return to the caller with the result.
       //
-      return result;
+        return result;
+      } catch(IOException e) {
+        if (e.getCause() instanceof StorageException) {
+          StorageException storageExcp  = (StorageException) e.getCause();
+          LOG.error("Encountered Storage Exception for read on Blob : {}"
+              + " Exception details: {} Error Code : {}",
+              key, e.getMessage(), storageExcp.getErrorCode());
+        }
+        throw e;
+      }
     }
 
     /*
@@ -730,18 +736,28 @@ public class NativeAzureFileSystem extends FileSystem {
      */
     @Override
     public synchronized int read(byte[] b, int off, int len) throws IOException {
-      int result = 0;
-      result = in.read(b, off, len);
-      if (result > 0) {
-        pos += result;
-      }
+      try {
+        int result = 0;
+        result = in.read(b, off, len);
+        if (result > 0) {
+          pos += result;
+        }
 
-      if (null != statistics) {
-        statistics.incrementBytesRead(result);
-      }
+        if (null != statistics) {
+          statistics.incrementBytesRead(result);
+        }
 
-      // Return to the caller with the result.
-      return result;
+        // Return to the caller with the result.
+        return result;
+      } catch(IOException e) {
+        if (e.getCause() instanceof StorageException) {
+          StorageException storageExcp  = (StorageException) e.getCause();
+          LOG.error("Encountered Storage Exception for read on Blob : {}"
+              + " Exception details: {} Error Code : {}",
+              key, e.getMessage(), storageExcp.getErrorCode());
+        }
+        throw e;
+      }
     }
 
     @Override
@@ -755,10 +771,8 @@ public class NativeAzureFileSystem extends FileSystem {
      in.close();
      in = store.retrieve(key);
      this.pos = in.skip(pos);
-     if (LOG.isDebugEnabled()) {
-       LOG.debug(String.format("Seek to position %d. Bytes skipped %d", pos,
-         this.pos));
-     }
+     LOG.debug("Seek to position {}. Bytes skipped {}", pos,
+         this.pos);
     }
 
     @Override
@@ -831,7 +845,17 @@ public class NativeAzureFileSystem extends FileSystem {
      */
     @Override
     public void write(int b) throws IOException {
-      out.write(b);
+      try {
+        out.write(b);
+      } catch(IOException e) {
+        if (e.getCause() instanceof StorageException) {
+          StorageException storageExcp  = (StorageException) e.getCause();
+          LOG.error("Encountered Storage Exception for write on Blob : {}"
+              + " Exception details: {} Error Code : {}",
+              key, e.getMessage(), storageExcp.getErrorCode());
+        }
+        throw e;
+      }
     }
 
     /**
@@ -844,7 +868,17 @@ public class NativeAzureFileSystem extends FileSystem {
      */
     @Override
     public void write(byte[] b) throws IOException {
-      out.write(b);
+      try {
+        out.write(b);
+      } catch(IOException e) {
+        if (e.getCause() instanceof StorageException) {
+          StorageException storageExcp  = (StorageException) e.getCause();
+          LOG.error("Encountered Storage Exception for write on Blob : {}"
+              + " Exception details: {} Error Code : {}",
+              key, e.getMessage(), storageExcp.getErrorCode());
+        }
+        throw e;
+      }
     }
 
     /**
@@ -864,7 +898,17 @@ public class NativeAzureFileSystem extends FileSystem {
      */
     @Override
     public void write(byte[] b, int off, int len) throws IOException {
-      out.write(b, off, len);
+      try {
+        out.write(b, off, len);
+      } catch(IOException e) {
+        if (e.getCause() instanceof StorageException) {
+          StorageException storageExcp  = (StorageException) e.getCause();
+          LOG.error("Encountered Storage Exception for write on Blob : {}"
+              + " Exception details: {} Error Code : {}",
+              key, e.getMessage(), storageExcp.getErrorCode());
+        }
+        throw e;
+      }
     }
 
     /**
@@ -912,9 +956,6 @@ public class NativeAzureFileSystem extends FileSystem {
      * The create also includes the name of the original key value which is
      * stored in the m_key member variable. This method should only be called
      * when the stream is closed.
-     * 
-     * @param anEncodedKey
-     *          Encoding of the original key stored in m_key member.
      */
     private void restoreKey() throws IOException {
       store.rename(getEncodedKey(), getKey());
@@ -1055,11 +1096,11 @@ public class NativeAzureFileSystem extends FileSystem {
     this.blockSize = conf.getLong(AZURE_BLOCK_SIZE_PROPERTY_NAME,
         MAX_AZURE_BLOCK_SIZE);
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("NativeAzureFileSystem. Initializing.");
-      LOG.debug("  blockSize  = "
-          + conf.getLong(AZURE_BLOCK_SIZE_PROPERTY_NAME, MAX_AZURE_BLOCK_SIZE));
-    }
+
+    LOG.debug("NativeAzureFileSystem. Initializing.");
+    LOG.debug("  blockSize  = {}",
+        conf.getLong(AZURE_BLOCK_SIZE_PROPERTY_NAME, MAX_AZURE_BLOCK_SIZE));
+
   }
 
   private NativeFileSystemStore createDefaultStore(Configuration conf) {
@@ -1206,7 +1247,6 @@ public class NativeAzureFileSystem extends FileSystem {
   }
 
   @Override
-  @SuppressWarnings("deprecation")
   public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
       boolean overwrite, int bufferSize, short replication, long blockSize,
       Progressable progress) throws IOException {
@@ -1234,8 +1274,8 @@ public class NativeAzureFileSystem extends FileSystem {
               f.getName() + " because parent folder does not exist.");
         }
 
-        LOG.warn("Got unexpected exception trying to get lease on "
-          + pathToKey(parent) + ". " + e.getMessage());
+        LOG.warn("Got unexpected exception trying to get lease on {} . {}",
+          pathToKey(parent), e.getMessage());
         throw e;
       }
     }
@@ -1253,7 +1293,7 @@ public class NativeAzureFileSystem extends FileSystem {
         // This'll let the keep-alive thread exit as soon as it wakes up.
         lease.free();
       } catch (Exception e) {
-        LOG.warn("Unable to free lease because: " + e.getMessage());
+        LOG.warn("Unable to free lease because: {}", e.getMessage());
       }
       throw new FileNotFoundException("Cannot create file " +
           f.getName() + " because parent folder does not exist.");
@@ -1271,7 +1311,7 @@ public class NativeAzureFileSystem extends FileSystem {
           lease.free();
         }
       } catch (Exception e) {
-        IOUtils.cleanup(LOG, out);
+        NativeAzureFileSystem.cleanup(LOG, out);
         String msg = "Unable to free lease on " + parent.toUri();
         LOG.error(msg);
         throw new IOException(msg, e);
@@ -1281,7 +1321,6 @@ public class NativeAzureFileSystem extends FileSystem {
   }
 
   @Override
-  @SuppressWarnings("deprecation")
   public FSDataOutputStream createNonRecursive(Path f, FsPermission permission,
       EnumSet<CreateFlag> flags, int bufferSize, short replication, long blockSize,
       Progressable progress) throws IOException {
@@ -1300,7 +1339,6 @@ public class NativeAzureFileSystem extends FileSystem {
   }
 
   @Override
-  @SuppressWarnings("deprecation")
   public FSDataOutputStream createNonRecursive(Path f,
       boolean overwrite, int bufferSize, short replication, long blockSize,
       Progressable progress) throws IOException {
@@ -1332,9 +1370,7 @@ public class NativeAzureFileSystem extends FileSystem {
       SelfRenewingLease parentFolderLease)
           throws IOException {
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Creating file: " + f.toString());
-    }
+    LOG.debug("Creating file: {}", f.toString());
 
     if (containsColon(f)) {
       throw new IOException("Cannot create file " + f
@@ -1362,8 +1398,12 @@ public class NativeAzureFileSystem extends FileSystem {
       String parentKey = pathToKey(parentFolder);
       FileMetadata parentMetadata = store.retrieveMetadata(parentKey);
       if (parentMetadata != null && parentMetadata.isDir() &&
-          parentMetadata.getBlobMaterialization() == BlobMaterialization.Explicit) {
-        store.updateFolderLastModifiedTime(parentKey, parentFolderLease);
+        parentMetadata.getBlobMaterialization() == BlobMaterialization.Explicit) {
+        if (parentFolderLease != null) {
+          store.updateFolderLastModifiedTime(parentKey, parentFolderLease);
+        } else {
+          updateParentFolderLastModifiedTime(key);
+        }
       } else {
         // Make sure that the parent folder exists.
         // Create it using inherited permissions from the first existing directory going up the path
@@ -1457,9 +1497,7 @@ public class NativeAzureFileSystem extends FileSystem {
   public boolean delete(Path f, boolean recursive,
       boolean skipParentFolderLastModifidedTimeUpdate) throws IOException {
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Deleting file: " + f.toString());
-    }
+    LOG.debug("Deleting file: {}", f.toString());
 
     Path absolutePath = makeAbsolute(f);
     String key = pathToKey(absolutePath);
@@ -1493,16 +1531,15 @@ public class NativeAzureFileSystem extends FileSystem {
               + parentPath + " which is also a file. Can't resolve.");
         }
         if (parentMetadata.getBlobMaterialization() == BlobMaterialization.Implicit) {
-          if (LOG.isDebugEnabled()) {
-            LOG.debug("Found an implicit parent directory while trying to"
-                + " delete the file " + f + ". Creating the directory blob for"
-                + " it in " + parentKey + ".");
-          }
+          LOG.debug("Found an implicit parent directory while trying to"
+              + " delete the file {}. Creating the directory blob for"
+              + " it in {}.", f, parentKey);
+
           store.storeEmptyFolder(parentKey,
               createPermissionStatus(FsPermission.getDefault()));
         } else {
           if (!skipParentFolderLastModifidedTimeUpdate) {
-            store.updateFolderLastModifiedTime(parentKey, null);
+            updateParentFolderLastModifiedTime(key);
           }
         }
       }
@@ -1511,18 +1548,17 @@ public class NativeAzureFileSystem extends FileSystem {
     } else {
       // The path specifies a folder. Recursively delete all entries under the
       // folder.
+      LOG.debug("Directory Delete encountered: {}", f.toString());
       Path parentPath = absolutePath.getParent();
       if (parentPath.getParent() != null) {
         String parentKey = pathToKey(parentPath);
         FileMetadata parentMetadata = store.retrieveMetadata(parentKey);
 
         if (parentMetadata.getBlobMaterialization() == BlobMaterialization.Implicit) {
-          if (LOG.isDebugEnabled()) {
-            LOG.debug("Found an implicit parent directory while trying to"
-                + " delete the directory " + f
-                + ". Creating the directory blob for" + " it in " + parentKey
-                + ".");
-          }
+          LOG.debug("Found an implicit parent directory while trying to"
+              + " delete the directory {}. Creating the directory blob for"
+              + " it in {}. ", f, parentKey);
+
           store.storeEmptyFolder(parentKey,
               createPermissionStatus(FsPermission.getDefault()));
         }
@@ -1563,24 +1599,22 @@ public class NativeAzureFileSystem extends FileSystem {
       // Update parent directory last modified time
       Path parent = absolutePath.getParent();
       if (parent != null && parent.getParent() != null) { // not root
-        String parentKey = pathToKey(parent);
         if (!skipParentFolderLastModifidedTimeUpdate) {
-          store.updateFolderLastModifiedTime(parentKey, null);
+          updateParentFolderLastModifiedTime(key);
         }
       }
       instrumentation.directoryDeleted();
     }
 
     // File or directory was successfully deleted.
+    LOG.debug("Delete Successful for : {}", f.toString());
     return true;
   }
 
   @Override
   public FileStatus getFileStatus(Path f) throws IOException {
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Getting the file status for " + f.toString());
-    }
+    LOG.debug("Getting the file status for {}", f.toString());
 
     // Capture the absolute path and the path to key.
     Path absolutePath = makeAbsolute(f);
@@ -1596,9 +1630,8 @@ public class NativeAzureFileSystem extends FileSystem {
       if (meta.isDir()) {
         // The path is a folder with files in it.
         //
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Path " + f.toString() + "is a folder.");
-        }
+
+        LOG.debug("Path {} is a folder.", f.toString());
 
         // If a rename operation for the folder was pending, redo it.
         // Then the file does not exist, so signal that.
@@ -1612,9 +1645,7 @@ public class NativeAzureFileSystem extends FileSystem {
       }
 
       // The path is a file.
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Found the path: " + f.toString() + " as a file.");
-      }
+      LOG.debug("Found the path: {} as a file.", f.toString());
 
       // Return with reference to a file object.
       return newFile(meta, absolutePath);
@@ -1667,9 +1698,7 @@ public class NativeAzureFileSystem extends FileSystem {
   @Override
   public FileStatus[] listStatus(Path f) throws IOException {
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Listing status for " + f.toString());
-    }
+    LOG.debug("Listing status for {}", f.toString());
 
     Path absolutePath = makeAbsolute(f);
     String key = pathToKey(absolutePath);
@@ -1678,9 +1707,9 @@ public class NativeAzureFileSystem extends FileSystem {
 
     if (meta != null) {
       if (!meta.isDir()) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Found path as a file");
-        }
+
+        LOG.debug("Found path as a file");
+
         return new FileStatus[] { newFile(meta, absolutePath) };
       }
       String partialKey = null;
@@ -1716,15 +1745,13 @@ public class NativeAzureFileSystem extends FileSystem {
           status.add(newFile(fileMetadata, subpath));
         }
       }
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Found path as a directory with " + status.size()
-            + " files in it.");
-      }
+
+      LOG.debug("Found path as a directory with {}"
+          + " files in it.", status.size());
+
     } else {
       // There is no metadata found for the path.
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Did not find any metadata for path: " + key);
-      }
+      LOG.debug("Did not find any metadata for path: {}", key);
 
       throw new FileNotFoundException("File" + f + " does not exist.");
     }
@@ -1795,7 +1822,7 @@ public class NativeAzureFileSystem extends FileSystem {
    * 
    * @param permission
    *          The permission to mask.
-   * @param applyDefaultUmask
+   * @param applyMode
    *          Whether to also apply the default umask.
    * @return The masked persmission.
    */
@@ -1837,9 +1864,9 @@ public class NativeAzureFileSystem extends FileSystem {
   }
 
   public boolean mkdirs(Path f, FsPermission permission, boolean noUmask) throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Creating directory: " + f.toString());
-    }
+
+
+    LOG.debug("Creating directory: {}", f.toString());
 
     if (containsColon(f)) {
       throw new IOException("Cannot create directory " + f
@@ -1896,9 +1923,8 @@ public class NativeAzureFileSystem extends FileSystem {
 
   @Override
   public FSDataInputStream open(Path f, int bufferSize) throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Opening file: " + f.toString());
-    }
+
+    LOG.debug("Opening file: {}", f.toString());
 
     Path absolutePath = makeAbsolute(f);
     String key = pathToKey(absolutePath);
@@ -1920,9 +1946,7 @@ public class NativeAzureFileSystem extends FileSystem {
 
     FolderRenamePending renamePending = null;
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Moving " + src + " to " + dst);
-    }
+    LOG.debug("Moving {} to {}", src, dst);
 
     if (containsColon(dst)) {
       throw new IOException("Cannot rename to file " + dst
@@ -1943,46 +1967,34 @@ public class NativeAzureFileSystem extends FileSystem {
     if (dstMetadata != null && dstMetadata.isDir()) {
       // It's an existing directory.
       dstKey = pathToKey(makeAbsolute(new Path(dst, src.getName())));
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Destination " + dst
-            + " is a directory, adjusted the destination to be " + dstKey);
-      }
+      LOG.debug("Destination {} "
+          + " is a directory, adjusted the destination to be {}", dst, dstKey);
     } else if (dstMetadata != null) {
       // Attempting to overwrite a file using rename()
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Destination " + dst
-            + " is an already existing file, failing the rename.");
-      }
+      LOG.debug("Destination {}"
+          + " is an already existing file, failing the rename.", dst);
       return false;
     } else {
       // Check that the parent directory exists.
       FileMetadata parentOfDestMetadata =
           store.retrieveMetadata(pathToKey(absoluteDst.getParent()));
       if (parentOfDestMetadata == null) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Parent of the destination " + dst
-              + " doesn't exist, failing the rename.");
-        }
+        LOG.debug("Parent of the destination {}"
+            + " doesn't exist, failing the rename.", dst);
         return false;
       } else if (!parentOfDestMetadata.isDir()) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Parent of the destination " + dst
-              + " is a file, failing the rename.");
-        }
+        LOG.debug("Parent of the destination {}"
+            + " is a file, failing the rename.", dst);
         return false;
       }
     }
     FileMetadata srcMetadata = store.retrieveMetadata(srcKey);
     if (srcMetadata == null) {
       // Source doesn't exist
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Source " + src + " doesn't exist, failing the rename.");
-      }
+      LOG.debug("Source {} doesn't exist, failing the rename.", src);
       return false;
     } else if (!srcMetadata.isDir()) {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Source " + src + " found as a file, renaming.");
-      }
+      LOG.debug("Source {} found as a file, renaming.", src);
       store.rename(srcKey, dstKey);
     } else {
 
@@ -1997,9 +2009,8 @@ public class NativeAzureFileSystem extends FileSystem {
       // In the future, we could generalize it easily to all folders.
       renamePending = prepareAtomicFolderRename(srcKey, dstKey);
       renamePending.execute();
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Renamed " + src + " to " + dst + " successfully.");
-      }
+
+      LOG.debug("Renamed {} to {} successfully.", src, dst);
       renamePending.cleanup();
       return true;
     }
@@ -2009,9 +2020,7 @@ public class NativeAzureFileSystem extends FileSystem {
     updateParentFolderLastModifiedTime(srcKey);
     updateParentFolderLastModifiedTime(dstKey);
 
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Renamed " + src + " to " + dst + " successfully.");
-    }
+    LOG.debug("Renamed {} to {} successfully.", src, dst);
     return true;
   }
 
@@ -2039,7 +2048,37 @@ public class NativeAzureFileSystem extends FileSystem {
               createPermissionStatus(FsPermission.getDefault()));
         }
 
-        store.updateFolderLastModifiedTime(parentKey, null);
+        if (store.isAtomicRenameKey(parentKey)) {
+          SelfRenewingLease lease = null;
+          try {
+            lease = leaseSourceFolder(parentKey);
+            store.updateFolderLastModifiedTime(parentKey, lease);
+          } catch (AzureException e) {
+            String errorCode = "";
+            try {
+              StorageException e2 = (StorageException) e.getCause();
+              errorCode = e2.getErrorCode();
+            } catch (Exception e3) {
+              // do nothing if cast fails
+            }
+            if (errorCode.equals("BlobNotFound")) {
+              throw new FileNotFoundException("Folder does not exist: " + parentKey);
+            }
+            LOG.warn("Got unexpected exception trying to get lease on {}. {}",
+                parentKey, e.getMessage());
+            throw e;
+          } finally {
+            try {
+              if (lease != null) {
+                lease.free();
+              }
+            } catch (Exception e) {
+              LOG.error("Unable to free lease on {}", parentKey, e);
+            }
+          }
+        } else {
+          store.updateFolderLastModifiedTime(parentKey, null);
+        }
       }
     }
   }
@@ -2216,10 +2255,8 @@ public class NativeAzureFileSystem extends FileSystem {
       AzureFileSystemMetricsSystem.fileSystemClosed();
     }
 
-    if (LOG.isDebugEnabled()) {
-        LOG.debug("Submitting metrics when file system closed took "
-                + (System.currentTimeMillis() - startTime) + " ms.");
-    }
+    LOG.debug("Submitting metrics when file system closed took {} ms.",
+        (System.currentTimeMillis() - startTime));
     isClosed = true;
   }
 
@@ -2240,9 +2277,8 @@ public class NativeAzureFileSystem extends FileSystem {
     @Override
     void handleFile(FileMetadata file, FileMetadata tempFile)
         throws IOException {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Deleting dangling file " + file.getKey());
-      }
+
+      LOG.debug("Deleting dangling file {}", file.getKey());
       store.delete(file.getKey());
       store.delete(tempFile.getKey());
     }
@@ -2262,9 +2298,8 @@ public class NativeAzureFileSystem extends FileSystem {
     @Override
     void handleFile(FileMetadata file, FileMetadata tempFile)
         throws IOException {
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Recovering " + file.getKey());
-      }
+
+      LOG.debug("Recovering {}", file.getKey());
       // Move to the final destination
       String finalDestinationKey =
           pathToKey(new Path(destination, file.getKey()));
@@ -2341,9 +2376,8 @@ public class NativeAzureFileSystem extends FileSystem {
    */
   public void recoverFilesWithDanglingTempData(Path root, Path destination)
       throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Recovering files with dangling temp data in " + root);
-    }
+
+    LOG.debug("Recovering files with dangling temp data in {}", root);
     handleFilesWithDanglingTempData(root,
         new DanglingFileRecoverer(destination));
   }
@@ -2359,9 +2393,8 @@ public class NativeAzureFileSystem extends FileSystem {
    * @throws IOException
    */
   public void deleteFilesWithDanglingTempData(Path root) throws IOException {
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Deleting files with dangling temp data in " + root);
-    }
+
+    LOG.debug("Deleting files with dangling temp data in {}", root);
     handleFilesWithDanglingTempData(root, new DanglingFileDeleter());
   }
 
@@ -2378,7 +2411,6 @@ public class NativeAzureFileSystem extends FileSystem {
    * recover the original key.
    * 
    * @param aKey
-   * @param numBuckets
    * @return Encoded version of the original key.
    */
   private static String encodeKey(String aKey) {
@@ -2397,5 +2429,17 @@ public class NativeAzureFileSystem extends FileSystem {
 
     // Return to the caller with the randomized key.
     return randomizedKey;
+  }
+
+  private static void cleanup(Logger log, java.io.Closeable closeable) {
+    if (closeable != null) {
+      try {
+        closeable.close();
+      } catch(IOException e) {
+        if (log != null) {
+          log.debug("Exception in closing {}", closeable, e);
+        }
+      }
+    }
   }
 }

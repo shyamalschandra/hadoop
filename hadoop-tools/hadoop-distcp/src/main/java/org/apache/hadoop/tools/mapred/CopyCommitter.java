@@ -70,7 +70,7 @@ public class CopyCommitter extends FileOutputCommitter {
     this.taskAttemptContext = context;
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public void commitJob(JobContext jobContext) throws IOException {
     Configuration conf = jobContext.getConfiguration();
@@ -102,7 +102,7 @@ public class CopyCommitter extends FileOutputCommitter {
     }
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public void abortJob(JobContext jobContext,
                        JobStatus.State state) throws IOException {
@@ -132,6 +132,9 @@ public class CopyCommitter extends FileOutputCommitter {
   private void deleteAttemptTempFiles(Path targetWorkPath,
                                       FileSystem targetFS,
                                       String jobId) throws IOException {
+    if (targetWorkPath == null) {
+      return;
+    }
 
     FileStatus[] tempFiles = targetFS.globStatus(
         new Path(targetWorkPath, ".distcp.tmp." + jobId.replaceAll("job","attempt") + "*"));

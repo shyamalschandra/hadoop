@@ -29,10 +29,8 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager;
 import org.apache.hadoop.security.token.delegation.DelegationKey;
-import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSecretManager.DelegationTokenInformation;
 import org.apache.hadoop.util.ExitUtil;
 import org.apache.hadoop.yarn.security.client.RMDelegationTokenIdentifier;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
@@ -58,13 +56,15 @@ public class RMDelegationTokenSecretManager extends
 
   /**
    * Create a secret manager
-   * @param delegationKeyUpdateInterval the number of seconds for rolling new
-   *        secret keys.
+   * @param delegationKeyUpdateInterval the number of milliseconds for rolling
+   *        new secret keys.
    * @param delegationTokenMaxLifetime the maximum lifetime of the delegation
-   *        tokens
+   *        tokens in milliseconds
    * @param delegationTokenRenewInterval how often the tokens must be renewed
+   *        in milliseconds
    * @param delegationTokenRemoverScanInterval how often the tokens are scanned
-   *        for expired tokens
+   *        for expired tokens in milliseconds
+   * @param rmContext current context of the ResourceManager
    */
   public RMDelegationTokenSecretManager(long delegationKeyUpdateInterval,
                                       long delegationTokenMaxLifetime,
@@ -109,8 +109,7 @@ public class RMDelegationTokenSecretManager extends
     try {
       LOG.info("storing RMDelegation token with sequence number: "
           + identifier.getSequenceNumber());
-      rmContext.getStateStore().storeRMDelegationTokenAndSequenceNumber(
-        identifier, renewDate, identifier.getSequenceNumber());
+      rmContext.getStateStore().storeRMDelegationToken(identifier, renewDate);
     } catch (Exception e) {
       LOG.error("Error in storing RMDelegationToken with sequence number: "
           + identifier.getSequenceNumber());
@@ -124,11 +123,10 @@ public class RMDelegationTokenSecretManager extends
     try {
       LOG.info("updating RMDelegation token with sequence number: "
           + id.getSequenceNumber());
-      rmContext.getStateStore().updateRMDelegationTokenAndSequenceNumber(id,
-        renewDate, id.getSequenceNumber());
+      rmContext.getStateStore().updateRMDelegationToken(id, renewDate);
     } catch (Exception e) {
-      LOG.error("Error in updating persisted RMDelegationToken with sequence number: "
-            + id.getSequenceNumber());
+      LOG.error("Error in updating persisted RMDelegationToken" +
+                " with sequence number: " + id.getSequenceNumber());
       ExitUtil.terminate(1, e);
     }
   }
@@ -139,8 +137,7 @@ public class RMDelegationTokenSecretManager extends
     try {
       LOG.info("removing RMDelegation token with sequence number: "
           + ident.getSequenceNumber());
-      rmContext.getStateStore().removeRMDelegationToken(ident,
-        delegationTokenSequenceNumber);
+      rmContext.getStateStore().removeRMDelegationToken(ident);
     } catch (Exception e) {
       LOG.error("Error in removing RMDelegationToken with sequence number: "
           + ident.getSequenceNumber());

@@ -31,8 +31,10 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 
+import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
-import org.apache.hadoop.yarn.server.api.ApplicationContext;
+import org.apache.hadoop.yarn.api.ApplicationBaseProtocol;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineAbout;
 import org.apache.hadoop.yarn.server.webapp.WebServices;
 import org.apache.hadoop.yarn.server.webapp.dao.AppAttemptInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.AppAttemptsInfo;
@@ -40,6 +42,7 @@ import org.apache.hadoop.yarn.server.webapp.dao.AppInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.AppsInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainerInfo;
 import org.apache.hadoop.yarn.server.webapp.dao.ContainersInfo;
+import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
 import org.apache.hadoop.yarn.webapp.BadRequestException;
 
 import com.google.inject.Inject;
@@ -50,8 +53,18 @@ import com.google.inject.Singleton;
 public class AHSWebServices extends WebServices {
 
   @Inject
-  public AHSWebServices(ApplicationContext appContext) {
-    super(appContext);
+  public AHSWebServices(ApplicationBaseProtocol appBaseProt) {
+    super(appBaseProt);
+  }
+
+  @GET
+  @Path("/about")
+  @Produces({ MediaType.APPLICATION_JSON, MediaType.APPLICATION_XML })
+  public TimelineAbout about(
+      @Context HttpServletRequest req,
+      @Context HttpServletResponse res) {
+    init(res);
+    return TimelineUtils.createTimelineAbout("Generic History Service API");
   }
 
   @GET
@@ -147,7 +160,8 @@ public class AHSWebServices extends WebServices {
     }
     Set<String> appStates = parseQueries(statesQuery, true);
     for (String appState : appStates) {
-      switch (YarnApplicationState.valueOf(appState.toUpperCase())) {
+      switch (YarnApplicationState.valueOf(
+          StringUtils.toUpperCase(appState))) {
         case FINISHED:
         case FAILED:
         case KILLED:

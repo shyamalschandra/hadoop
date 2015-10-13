@@ -28,13 +28,11 @@ import java.util.Properties;
 import javax.servlet.FilterConfig;
 import javax.servlet.ServletException;
 import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.http.lib.StaticUserWebFilter.StaticUserFilter;
 import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
-import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHandler;
 import org.apache.hadoop.security.authentication.server.PseudoAuthenticationHandler;
+import org.apache.hadoop.yarn.api.ApplicationBaseProtocol;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
@@ -44,20 +42,24 @@ import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
 import org.apache.hadoop.yarn.api.records.YarnApplicationState;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.server.api.ApplicationContext;
+import org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryClientService;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryManagerOnTimelineStore;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.TestApplicationHistoryManagerOnTimelineStore;
 import org.apache.hadoop.yarn.server.security.ApplicationACLsManager;
 import org.apache.hadoop.yarn.server.timeline.TimelineDataManager;
 import org.apache.hadoop.yarn.server.timeline.TimelineStore;
 import org.apache.hadoop.yarn.server.timeline.security.TimelineACLsManager;
+import org.apache.hadoop.yarn.api.records.timeline.TimelineAbout;
+import org.apache.hadoop.yarn.util.timeline.TimelineUtils;
 import org.apache.hadoop.yarn.webapp.GenericExceptionHandler;
+import org.apache.hadoop.yarn.webapp.JerseyTestBase;
 import org.apache.hadoop.yarn.webapp.WebServicesTestUtils;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -73,36 +75,44 @@ import com.sun.jersey.api.client.ClientResponse.Status;
 import com.sun.jersey.api.client.UniformInterfaceException;
 import com.sun.jersey.api.client.WebResource;
 import com.sun.jersey.guice.spi.container.servlet.GuiceContainer;
-import com.sun.jersey.test.framework.JerseyTest;
 import com.sun.jersey.test.framework.WebAppDescriptor;
 
 @RunWith(Parameterized.class)
-public class TestAHSWebServices extends JerseyTest {
+public class TestAHSWebServices extends JerseyTestBase {
 
-  private static ApplicationHistoryManagerOnTimelineStore historyManager;
+  private static ApplicationHistoryClientService historyClientService;
   private static final String[] USERS = new String[] { "foo" , "bar" };
+  private static final int MAX_APPS = 5;
 
   @BeforeClass
   public static void setupClass() throws Exception {
     Configuration conf = new YarnConfiguration();
     TimelineStore store =
-        TestApplicationHistoryManagerOnTimelineStore.createStore(5);
+        TestApplicationHistoryManagerOnTimelineStore.createStore(MAX_APPS);
     TimelineACLsManager aclsManager = new TimelineACLsManager(conf);
     TimelineDataManager dataManager =
         new TimelineDataManager(store, aclsManager);
     conf.setBoolean(YarnConfiguration.YARN_ACL_ENABLE, true);
     conf.set(YarnConfiguration.YARN_ADMIN_ACL, "foo");
+    dataManager.init(conf);
     ApplicationACLsManager appAclsManager = new ApplicationACLsManager(conf);
-    historyManager =
+    ApplicationHistoryManagerOnTimelineStore historyManager =
         new ApplicationHistoryManagerOnTimelineStore(dataManager, appAclsManager);
     historyManager.init(conf);
-    historyManager.start();
+    historyClientService = new ApplicationHistoryClientService(historyManager) {
+      @Override
+      protected void serviceStart() throws Exception {
+        // Do Nothing
+      }
+    };
+    historyClientService.init(conf);
+    historyClientService.start();
   }
 
   @AfterClass
   public static void tearDownClass() throws Exception {
-    if (historyManager != null) {
-      historyManager.stop();
+    if (historyClientService != null) {
+      historyClientService.stop();
     }
   }
 
@@ -118,7 +128,7 @@ public class TestAHSWebServices extends JerseyTest {
       bind(JAXBContextResolver.class);
       bind(AHSWebServices.class);
       bind(GenericExceptionHandler.class);
-      bind(ApplicationContext.class).toInstance(historyManager);
+      bind(ApplicationBaseProtocol.class).toInstance(historyClientService);
       serve("/*").with(GuiceContainer.class);
       filter("/*").through(TestSimpleAuthFilter.class);
     }
@@ -154,6 +164,66 @@ public class TestAHSWebServices extends JerseyTest {
       .filterClass(com.google.inject.servlet.GuiceFilter.class)
       .contextPath("jersey-guice-filter").servletPath("/").build());
     this.round = round;
+  }
+
+  @Test
+  public void testInvalidApp() {
+    ApplicationId appId = ApplicationId.newInstance(0, MAX_APPS + 1);
+    WebResource r = resource();
+    ClientResponse response =
+        r.path("ws").path("v1").path("applicationhistory").path("apps")
+          .path(appId.toString())
+          .queryParam("user.name", USERS[round])
+          .accept(MediaType.APPLICATION_JSON)
+          .get(ClientResponse.class);
+    assertEquals("404 not found expected", Status.NOT_FOUND,
+        response.getClientResponseStatus());
+  }
+
+  @Test
+  public void testInvalidAttempt() {
+    ApplicationId appId = ApplicationId.newInstance(0, 1);
+    ApplicationAttemptId appAttemptId =
+        ApplicationAttemptId.newInstance(appId, MAX_APPS + 1);
+    WebResource r = resource();
+    ClientResponse response =
+        r.path("ws").path("v1").path("applicationhistory").path("apps")
+          .path(appId.toString()).path("appattempts")
+          .path(appAttemptId.toString())
+          .queryParam("user.name", USERS[round])
+          .accept(MediaType.APPLICATION_JSON)
+          .get(ClientResponse.class);
+    if (round == 1) {
+      assertEquals(Status.FORBIDDEN, response.getClientResponseStatus());
+      return;
+    }
+    assertEquals("404 not found expected", Status.NOT_FOUND,
+            response.getClientResponseStatus());
+  }
+
+  @Test
+  public void testInvalidContainer() throws Exception {
+    ApplicationId appId = ApplicationId.newInstance(0, 1);
+    ApplicationAttemptId appAttemptId =
+        ApplicationAttemptId.newInstance(appId, 1);
+    ContainerId containerId = ContainerId.newContainerId(appAttemptId,
+        MAX_APPS + 1);
+    WebResource r = resource();
+    ClientResponse response =
+        r.path("ws").path("v1").path("applicationhistory").path("apps")
+          .path(appId.toString()).path("appattempts")
+          .path(appAttemptId.toString()).path("containers")
+          .path(containerId.toString())
+          .queryParam("user.name", USERS[round])
+          .accept(MediaType.APPLICATION_JSON)
+          .get(ClientResponse.class);
+    if (round == 1) {
+      assertEquals(
+          Status.FORBIDDEN, response.getClientResponseStatus());
+      return;
+    }
+    assertEquals("404 not found expected", Status.NOT_FOUND,
+            response.getClientResponseStatus());
   }
 
   @Test
@@ -208,6 +278,34 @@ public class TestAHSWebServices extends JerseyTest {
       WebServicesTestUtils.checkStringMatch(
         "error string exists and shouldn't", "", responseStr);
     }
+  }
+
+  @Test
+  public void testAbout() throws Exception {
+    WebResource r = resource();
+    ClientResponse response = r
+        .path("ws").path("v1").path("applicationhistory").path("about")
+        .queryParam("user.name", USERS[round])
+        .accept(MediaType.APPLICATION_JSON).get(ClientResponse.class);
+    assertEquals(MediaType.APPLICATION_JSON_TYPE, response.getType());
+    TimelineAbout actualAbout = response.getEntity(TimelineAbout.class);
+    TimelineAbout expectedAbout =
+        TimelineUtils.createTimelineAbout("Generic History Service API");
+    Assert.assertNotNull(
+        "Timeline service about response is null", actualAbout);
+    Assert.assertEquals(expectedAbout.getAbout(), actualAbout.getAbout());
+    Assert.assertEquals(expectedAbout.getTimelineServiceVersion(),
+        actualAbout.getTimelineServiceVersion());
+    Assert.assertEquals(expectedAbout.getTimelineServiceBuildVersion(),
+        actualAbout.getTimelineServiceBuildVersion());
+    Assert.assertEquals(expectedAbout.getTimelineServiceVersionBuiltOn(),
+        actualAbout.getTimelineServiceVersionBuiltOn());
+    Assert.assertEquals(expectedAbout.getHadoopVersion(),
+        actualAbout.getHadoopVersion());
+    Assert.assertEquals(expectedAbout.getHadoopBuildVersion(),
+        actualAbout.getHadoopBuildVersion());
+    Assert.assertEquals(expectedAbout.getHadoopVersionBuiltOn(),
+        actualAbout.getHadoopVersionBuiltOn());
   }
 
   @Test
@@ -372,5 +470,4 @@ public class TestAHSWebServices extends JerseyTest {
     assertEquals(ContainerState.COMPLETE.toString(),
       container.getString("containerState"));
   }
-
 }

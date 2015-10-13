@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.api.records.impl.pb;
 import org.apache.hadoop.yarn.api.records.LogAggregationContext;
 import org.apache.hadoop.yarn.proto.YarnProtos.LogAggregationContextProto;
 import org.apache.hadoop.yarn.proto.YarnProtos.LogAggregationContextProtoOrBuilder;
+
 import com.google.protobuf.TextFormat;
 
 public class LogAggregationContextPBImpl extends LogAggregationContext{
@@ -115,5 +116,83 @@ public class LogAggregationContextPBImpl extends LogAggregationContext{
       return;
     }
     builder.setExcludePattern(excludePattern);
+  }
+
+  @Override
+  public String getRolledLogsIncludePattern() {
+    LogAggregationContextProtoOrBuilder p = viaProto ? proto : builder;
+    if (! p.hasRolledLogsIncludePattern()) {
+      return null;
+    }
+    return p.getRolledLogsIncludePattern();
+  }
+
+  @Override
+  public void setRolledLogsIncludePattern(String rolledLogsIncludePattern) {
+    maybeInitBuilder();
+    if (rolledLogsIncludePattern == null) {
+      builder.clearRolledLogsIncludePattern();
+      return;
+    }
+    builder.setRolledLogsIncludePattern(rolledLogsIncludePattern);
+  }
+
+  @Override
+  public String getRolledLogsExcludePattern() {
+    LogAggregationContextProtoOrBuilder p = viaProto ? proto : builder;
+    if (! p.hasRolledLogsExcludePattern()) {
+      return null;
+    }
+    return p.getRolledLogsExcludePattern();
+  }
+
+  @Override
+  public void setRolledLogsExcludePattern(String rolledLogsExcludePattern) {
+    maybeInitBuilder();
+    if (rolledLogsExcludePattern == null) {
+      builder.clearRolledLogsExcludePattern();
+      return;
+    }
+    builder.setRolledLogsExcludePattern(rolledLogsExcludePattern);
+  }
+
+  @Override
+  public String getLogAggregationPolicyClassName() {
+    LogAggregationContextProtoOrBuilder p = viaProto ? proto : builder;
+    if (! p.hasLogAggregationPolicyClassName()) {
+      return null;
+    }
+    return p.getLogAggregationPolicyClassName();
+  }
+
+  @Override
+  public void setLogAggregationPolicyClassName(
+      String className) {
+    maybeInitBuilder();
+    if (className == null) {
+      builder.clearLogAggregationPolicyClassName();
+      return;
+    }
+    builder.setLogAggregationPolicyClassName(className);
+  }
+
+  @Override
+  public String getLogAggregationPolicyParameters() {
+    LogAggregationContextProtoOrBuilder p = viaProto ? proto : builder;
+    if (! p.hasLogAggregationPolicyParameters()) {
+      return null;
+    }
+    return p.getLogAggregationPolicyParameters();
+  }
+
+  @Override
+  public void setLogAggregationPolicyParameters(
+      String config) {
+    maybeInitBuilder();
+    if (config == null) {
+      builder.clearLogAggregationPolicyParameters();
+      return;
+    }
+    builder.setLogAggregationPolicyParameters(config);
   }
 }

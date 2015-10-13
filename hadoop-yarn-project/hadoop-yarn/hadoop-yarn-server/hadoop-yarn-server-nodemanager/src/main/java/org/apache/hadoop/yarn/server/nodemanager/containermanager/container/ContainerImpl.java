@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,7 +38,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.security.Credentials;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerExitStatus;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerLaunchContext;
@@ -59,7 +59,9 @@ import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.Conta
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.launcher.ContainersLauncherEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.LocalResourceRequest;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.event.ContainerLocalizationCleanupEvent;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.event.ContainerLocalizationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.event.ContainerLocalizationRequestEvent;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.event.LocalizationEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.sharedcache.SharedCacheUploadEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.localizer.sharedcache.SharedCacheUploadEventType;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.loghandler.event.LogHandlerContainerFinishedEvent;
@@ -69,12 +71,15 @@ import org.apache.hadoop.yarn.server.nodemanager.metrics.NodeManagerMetrics;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService;
 import org.apache.hadoop.yarn.server.nodemanager.recovery.NMStateStoreService.RecoveredContainerStatus;
 import org.apache.hadoop.yarn.server.utils.BuilderUtils;
-import org.apache.hadoop.yarn.state.InvalidStateTransitonException;
+import org.apache.hadoop.yarn.state.InvalidStateTransitionException;
 import org.apache.hadoop.yarn.state.MultipleArcTransition;
 import org.apache.hadoop.yarn.state.SingleArcTransition;
 import org.apache.hadoop.yarn.state.StateMachine;
 import org.apache.hadoop.yarn.state.StateMachineFactory;
+import org.apache.hadoop.yarn.util.Clock;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.apache.hadoop.yarn.util.SystemClock;
+import org.apache.hadoop.yarn.util.resource.Resources;
 
 public class ContainerImpl implements Container {
 
@@ -87,16 +92,19 @@ public class ContainerImpl implements Container {
   private final ContainerLaunchContext launchContext;
   private final ContainerTokenIdentifier containerTokenIdentifier;
   private final ContainerId containerId;
-  private final Resource resource;
+  private volatile Resource resource;
   private final String user;
   private int exitCode = ContainerExitStatus.INVALID;
   private final StringBuilder diagnostics;
   private boolean wasLaunched;
+  private long containerLocalizationStartTime;
+  private long containerLaunchStartTime;
+  private static Clock clock = new SystemClock();
 
   /** The NM-wide configuration - not specific to this container */
   private final Configuration daemonConf;
 
-  private static final Log LOG = LogFactory.getLog(Container.class);
+  private static final Log LOG = LogFactory.getLog(ContainerImpl.class);
   private final Map<LocalResourceRequest,List<String>> pendingResources =
     new HashMap<LocalResourceRequest,List<String>>();
   private final Map<Path,List<String>> localizedResources =
@@ -146,17 +154,20 @@ public class ContainerImpl implements Container {
       Credentials creds, NodeManagerMetrics metrics,
       ContainerTokenIdentifier containerTokenIdentifier,
       RecoveredContainerStatus recoveredStatus, int exitCode,
-      String diagnostics, boolean wasKilled) {
+      String diagnostics, boolean wasKilled, Resource recoveredCapability) {
     this(conf, dispatcher, stateStore, launchContext, creds, metrics,
         containerTokenIdentifier);
     this.recoveredStatus = recoveredStatus;
     this.exitCode = exitCode;
     this.recoveredAsKilled = wasKilled;
     this.diagnostics.append(diagnostics);
+    if (recoveredCapability != null
+        && !this.resource.equals(recoveredCapability)) {
+      // resource capability had been updated before NM was down
+      this.resource = Resource.newInstance(recoveredCapability.getMemory(),
+          recoveredCapability.getVirtualCores());
+    }
   }
-
-  private static final ContainerDoneTransition CONTAINER_DONE_TRANSITION =
-    new ContainerDoneTransition();
 
   private static final ContainerDiagnosticsUpdateTransition UPDATE_DIAGNOSTICS_TRANSITION =
       new ContainerDiagnosticsUpdateTransition();
@@ -198,7 +209,7 @@ public class ContainerImpl implements Container {
     .addTransition(ContainerState.LOCALIZATION_FAILED,
         ContainerState.DONE,
         ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP,
-        CONTAINER_DONE_TRANSITION)
+        new LocalizationFailedToDoneTransition())
     .addTransition(ContainerState.LOCALIZATION_FAILED,
         ContainerState.LOCALIZATION_FAILED,
         ContainerEventType.UPDATE_DIAGNOSTICS_MSG,
@@ -245,12 +256,12 @@ public class ContainerImpl implements Container {
         ContainerEventType.KILL_CONTAINER, new KillTransition())
     .addTransition(ContainerState.RUNNING, ContainerState.EXITED_WITH_FAILURE,
         ContainerEventType.CONTAINER_KILLED_ON_REQUEST,
-        new KilledExternallyTransition()) 
+        new KilledExternallyTransition())
 
     // From CONTAINER_EXITED_WITH_SUCCESS State
     .addTransition(ContainerState.EXITED_WITH_SUCCESS, ContainerState.DONE,
         ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP,
-        CONTAINER_DONE_TRANSITION)
+        new ExitedWithSuccessToDoneTransition())
     .addTransition(ContainerState.EXITED_WITH_SUCCESS,
         ContainerState.EXITED_WITH_SUCCESS,
         ContainerEventType.UPDATE_DIAGNOSTICS_MSG,
@@ -262,7 +273,7 @@ public class ContainerImpl implements Container {
     // From EXITED_WITH_FAILURE State
     .addTransition(ContainerState.EXITED_WITH_FAILURE, ContainerState.DONE,
             ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP,
-            CONTAINER_DONE_TRANSITION)
+            new ExitedWithFailureToDoneTransition())
     .addTransition(ContainerState.EXITED_WITH_FAILURE,
         ContainerState.EXITED_WITH_FAILURE,
         ContainerEventType.UPDATE_DIAGNOSTICS_MSG,
@@ -297,7 +308,7 @@ public class ContainerImpl implements Container {
     .addTransition(ContainerState.KILLING,
             ContainerState.DONE,
             ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP,
-            CONTAINER_DONE_TRANSITION)
+            new KillingToDoneTransition())
     // Handle a launched container during killing stage is a no-op
     // as cleanup container is always handled after launch container event
     // in the container launcher
@@ -309,7 +320,7 @@ public class ContainerImpl implements Container {
     .addTransition(ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
             ContainerState.DONE,
             ContainerEventType.CONTAINER_RESOURCES_CLEANEDUP,
-            CONTAINER_DONE_TRANSITION)
+            new ContainerCleanedupAfterKillToDoneTransition())
     .addTransition(ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
         ContainerState.CONTAINER_CLEANEDUP_AFTER_KILL,
         ContainerEventType.UPDATE_DIAGNOSTICS_MSG,
@@ -420,7 +431,7 @@ public class ContainerImpl implements Container {
     this.readLock.lock();
     try {
       return BuilderUtils.newContainerStatus(this.containerId,
-        getCurrentState(), diagnostics.toString(), exitCode);
+        getCurrentState(), diagnostics.toString(), exitCode, getResource());
     } finally {
       this.readLock.unlock();
     }
@@ -431,9 +442,10 @@ public class ContainerImpl implements Container {
     this.readLock.lock();
     try {
       return NMContainerStatus.newInstance(this.containerId, getCurrentState(),
-        getResource(), diagnostics.toString(), exitCode,
-        containerTokenIdentifier.getPriority(),
-        containerTokenIdentifier.getCreationTime());
+          getResource(), diagnostics.toString(), exitCode,
+          containerTokenIdentifier.getPriority(),
+          containerTokenIdentifier.getCreationTime(),
+          containerTokenIdentifier.getNodeLabelExpression());
     } finally {
       this.readLock.unlock();
     }
@@ -446,7 +458,14 @@ public class ContainerImpl implements Container {
 
   @Override
   public Resource getResource() {
-    return this.resource;
+    return Resources.clone(this.resource);
+  }
+
+  @Override
+  public void setResource(Resource targetResource) {
+    Resource currentResource = getResource();
+    this.resource = Resources.clone(targetResource);
+    this.metrics.changeContainer(currentResource, targetResource);
   }
 
   @Override
@@ -457,47 +476,6 @@ public class ContainerImpl implements Container {
     } finally {
       this.readLock.unlock();
     }
-  }
-
-  @SuppressWarnings("fallthrough")
-  private void finished() {
-    ApplicationId applicationId =
-        containerId.getApplicationAttemptId().getApplicationId();
-    switch (getContainerState()) {
-      case EXITED_WITH_SUCCESS:
-        metrics.endRunningContainer();
-        metrics.completedContainer();
-        NMAuditLogger.logSuccess(user,
-            AuditConstants.FINISH_SUCCESS_CONTAINER, "ContainerImpl",
-            applicationId, containerId);
-        break;
-      case EXITED_WITH_FAILURE:
-        if (wasLaunched) {
-          metrics.endRunningContainer();
-        }
-        // fall through
-      case LOCALIZATION_FAILED:
-        metrics.failedContainer();
-        NMAuditLogger.logFailure(user,
-            AuditConstants.FINISH_FAILED_CONTAINER, "ContainerImpl",
-            "Container failed with state: " + getContainerState(),
-            applicationId, containerId);
-        break;
-      case CONTAINER_CLEANEDUP_AFTER_KILL:
-        if (wasLaunched) {
-          metrics.endRunningContainer();
-        }
-        // fall through
-      case NEW:
-        metrics.killedContainer();
-        NMAuditLogger.logSuccess(user,
-            AuditConstants.FINISH_KILLED_CONTAINER, "ContainerImpl",
-            applicationId,
-            containerId);
-    }
-
-    metrics.releaseContainer(this.resource);
-    sendFinishedEvents();
   }
 
   @SuppressWarnings("unchecked")
@@ -521,6 +499,7 @@ public class ContainerImpl implements Container {
       // try to recover a container that was previously launched
       launcherEvent = ContainersLauncherEventType.RECOVER_CONTAINER;
     }
+    containerLaunchStartTime = clock.getTime();
     dispatcher.getEventHandler().handle(
         new ContainersLauncherEvent(this, launcherEvent));
   }
@@ -529,15 +508,21 @@ public class ContainerImpl implements Container {
   // resource usage.
   @SuppressWarnings("unchecked") // dispatcher not typed
   private void sendContainerMonitorStartEvent() {
-      long pmemBytes = getResource().getMemory() * 1024 * 1024L;
-      float pmemRatio = daemonConf.getFloat(
-          YarnConfiguration.NM_VMEM_PMEM_RATIO,
-          YarnConfiguration.DEFAULT_NM_VMEM_PMEM_RATIO);
-      long vmemBytes = (long) (pmemRatio * pmemBytes);
+    long launchDuration = clock.getTime() - containerLaunchStartTime;
+    metrics.addContainerLaunchDuration(launchDuration);
 
-      dispatcher.getEventHandler().handle(
-          new ContainerStartMonitoringEvent(containerId,
-              vmemBytes, pmemBytes));
+    long pmemBytes = getResource().getMemory() * 1024 * 1024L;
+    float pmemRatio = daemonConf.getFloat(
+        YarnConfiguration.NM_VMEM_PMEM_RATIO,
+        YarnConfiguration.DEFAULT_NM_VMEM_PMEM_RATIO);
+    long vmemBytes = (long) (pmemRatio * pmemBytes);
+    int cpuVcores = getResource().getVirtualCores();
+    long localizationDuration = containerLaunchStartTime -
+        containerLocalizationStartTime;
+    dispatcher.getEventHandler().handle(
+        new ContainerStartMonitoringEvent(containerId,
+        vmemBytes, pmemBytes, cpuVcores, launchDuration,
+        localizationDuration));
   }
 
   private void addDiagnostics(String... diags) {
@@ -606,7 +591,13 @@ public class ContainerImpl implements Container {
       } else if (container.recoveredAsKilled &&
           container.recoveredStatus == RecoveredContainerStatus.REQUESTED) {
         // container was killed but never launched
-        container.finished();
+        container.metrics.killedContainer();
+        NMAuditLogger.logSuccess(container.user,
+            AuditConstants.FINISH_KILLED_CONTAINER, "ContainerImpl",
+            container.containerId.getApplicationAttemptId().getApplicationId(),
+            container.containerId);
+        container.metrics.releaseContainer(container.resource);
+        container.sendFinishedEvents();
         return ContainerState.DONE;
       }
 
@@ -630,6 +621,7 @@ public class ContainerImpl implements Container {
         }
       }
 
+      container.containerLocalizationStartTime = clock.getTime();
       // Send requests for public, private resources
       Map<String,LocalResource> cntrRsrc = ctxt.getLocalResources();
       if (!cntrRsrc.isEmpty()) {
@@ -671,7 +663,7 @@ public class ContainerImpl implements Container {
           return ContainerState.LOCALIZATION_FAILED;
         }
         Map<LocalResourceVisibility, Collection<LocalResourceRequest>> req =
-            new HashMap<LocalResourceVisibility, 
+            new LinkedHashMap<LocalResourceVisibility,
                         Collection<LocalResourceRequest>>();
         if (!container.publicRsrcs.isEmpty()) {
           req.put(LocalResourceVisibility.PUBLIC, container.publicRsrcs);
@@ -747,7 +739,12 @@ public class ContainerImpl implements Container {
         return ContainerState.LOCALIZING;
       }
 
+      container.dispatcher.getEventHandler().handle(
+          new ContainerLocalizationEvent(LocalizationEventType.
+              CONTAINER_RESOURCES_LOCALIZED, container));
+
       container.sendLaunchEvent();
+      container.metrics.endInitingContainer();
 
       // If this is a recovered container that has already launched, skip
       // uploading resources to the shared cache. We do this to avoid uploading
@@ -765,7 +762,6 @@ public class ContainerImpl implements Container {
                 SharedCacheUploadEventType.UPLOAD));
       }
 
-      container.metrics.endInitingContainer();
       return ContainerState.LOCALIZED;
     }
   }
@@ -987,7 +983,8 @@ public class ContainerImpl implements Container {
     @Override
     @SuppressWarnings("unchecked")
     public void transition(ContainerImpl container, ContainerEvent event) {
-      container.finished();
+      container.metrics.releaseContainer(container.resource);
+      container.sendFinishedEvents();
       //if the current state is NEW it means the CONTAINER_INIT was never 
       // sent for the event, thus no need to send the CONTAINER_STOP
       if (container.getCurrentState() 
@@ -1009,6 +1006,105 @@ public class ContainerImpl implements Container {
       container.exitCode = killEvent.getContainerExitStatus();
       container.addDiagnostics(killEvent.getDiagnostic(), "\n");
       container.addDiagnostics("Container is killed before being launched.\n");
+      container.metrics.killedContainer();
+      NMAuditLogger.logSuccess(container.user,
+          AuditConstants.FINISH_KILLED_CONTAINER, "ContainerImpl",
+          container.containerId.getApplicationAttemptId().getApplicationId(),
+          container.containerId);
+      super.transition(container, event);
+    }
+  }
+
+  /**
+   * Handle the following transition:
+   * - LOCALIZATION_FAILED -> DONE upon CONTAINER_RESOURCES_CLEANEDUP
+   */
+  static class LocalizationFailedToDoneTransition extends
+      ContainerDoneTransition {
+    @Override
+    public void transition(ContainerImpl container, ContainerEvent event) {
+      container.metrics.failedContainer();
+      NMAuditLogger.logFailure(container.user,
+          AuditConstants.FINISH_FAILED_CONTAINER, "ContainerImpl",
+          "Container failed with state: " + container.getContainerState(),
+          container.containerId.getApplicationAttemptId().getApplicationId(),
+          container.containerId);
+      super.transition(container, event);
+    }
+  }
+
+  /**
+   * Handle the following transition:
+   * - EXITED_WITH_SUCCESS -> DONE upon CONTAINER_RESOURCES_CLEANEDUP
+   */
+  static class ExitedWithSuccessToDoneTransition extends
+      ContainerDoneTransition {
+    @Override
+    public void transition(ContainerImpl container, ContainerEvent event) {
+      container.metrics.endRunningContainer();
+      container.metrics.completedContainer();
+      NMAuditLogger.logSuccess(container.user,
+          AuditConstants.FINISH_SUCCESS_CONTAINER, "ContainerImpl",
+          container.containerId.getApplicationAttemptId().getApplicationId(),
+          container.containerId);
+      super.transition(container, event);
+    }
+  }
+
+  /**
+   * Handle the following transition:
+   * - EXITED_WITH_FAILURE -> DONE upon CONTAINER_RESOURCES_CLEANEDUP
+   */
+  static class ExitedWithFailureToDoneTransition extends
+      ContainerDoneTransition {
+    @Override
+    public void transition(ContainerImpl container, ContainerEvent event) {
+      if (container.wasLaunched) {
+        container.metrics.endRunningContainer();
+      }
+      container.metrics.failedContainer();
+      NMAuditLogger.logFailure(container.user,
+          AuditConstants.FINISH_FAILED_CONTAINER, "ContainerImpl",
+          "Container failed with state: " + container.getContainerState(),
+          container.containerId.getApplicationAttemptId().getApplicationId(),
+          container.containerId);
+      super.transition(container, event);
+    }
+  }
+
+  /**
+   * Handle the following transition:
+   * - KILLING -> DONE upon CONTAINER_RESOURCES_CLEANEDUP
+   */
+  static class KillingToDoneTransition extends
+      ContainerDoneTransition {
+    @Override
+    public void transition(ContainerImpl container, ContainerEvent event) {
+      container.metrics.killedContainer();
+      NMAuditLogger.logSuccess(container.user,
+          AuditConstants.FINISH_KILLED_CONTAINER, "ContainerImpl",
+          container.containerId.getApplicationAttemptId().getApplicationId(),
+          container.containerId);
+      super.transition(container, event);
+    }
+  }
+
+  /**
+   * Handle the following transition:
+   * CONTAINER_CLEANEDUP_AFTER_KILL -> DONE upon CONTAINER_RESOURCES_CLEANEDUP
+   */
+  static class ContainerCleanedupAfterKillToDoneTransition extends
+      ContainerDoneTransition {
+    @Override
+    public void transition(ContainerImpl container, ContainerEvent event) {
+      if (container.wasLaunched) {
+        container.metrics.endRunningContainer();
+      }
+      container.metrics.killedContainer();
+      NMAuditLogger.logSuccess(container.user,
+          AuditConstants.FINISH_KILLED_CONTAINER, "ContainerImpl",
+          container.containerId.getApplicationAttemptId().getApplicationId(),
+          container.containerId);
       super.transition(container, event);
     }
   }
@@ -1023,13 +1119,6 @@ public class ContainerImpl implements Container {
       ContainerDiagnosticsUpdateEvent updateEvent =
           (ContainerDiagnosticsUpdateEvent) event;
       container.addDiagnostics(updateEvent.getDiagnosticsUpdate(), "\n");
-      try {
-        container.stateStore.storeContainerDiagnostics(container.containerId,
-            container.diagnostics);
-      } catch (IOException e) {
-        LOG.warn("Unable to update state store diagnostics for "
-            + container.containerId, e);
-      }
     }
   }
 
@@ -1046,7 +1135,7 @@ public class ContainerImpl implements Container {
       try {
         newState =
             stateMachine.doTransition(event.getType(), event);
-      } catch (InvalidStateTransitonException e) {
+      } catch (InvalidStateTransitionException e) {
         LOG.warn("Can't handle this event at current state: Current: ["
             + oldState + "], eventType: [" + event.getType() + "]", e);
       }

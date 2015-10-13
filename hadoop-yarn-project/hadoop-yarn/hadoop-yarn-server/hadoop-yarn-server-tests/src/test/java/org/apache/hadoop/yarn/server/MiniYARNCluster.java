@@ -37,6 +37,7 @@ import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.service.AbstractService;
 import org.apache.hadoop.service.CompositeService;
+import org.apache.hadoop.service.ServiceStateException;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.Shell.ShellCommandExecutor;
 import org.apache.hadoop.yarn.api.protocolrecords.GetClusterMetricsRequest;
@@ -54,10 +55,11 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NodeHeartbeatResponse;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerRequest;
 import org.apache.hadoop.yarn.server.api.protocolrecords.RegisterNodeManagerResponse;
+import org.apache.hadoop.yarn.server.api.protocolrecords.UnRegisterNodeManagerRequest;
+import org.apache.hadoop.yarn.server.api.protocolrecords.UnRegisterNodeManagerResponse;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryServer;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.ApplicationHistoryStore;
 import org.apache.hadoop.yarn.server.applicationhistoryservice.MemoryApplicationHistoryStore;
-import org.apache.hadoop.yarn.server.applicationhistoryservice.webapp.AHSWebApp;
 import org.apache.hadoop.yarn.server.nodemanager.Context;
 import org.apache.hadoop.yarn.server.nodemanager.NodeHealthCheckerService;
 import org.apache.hadoop.yarn.server.nodemanager.NodeManager;
@@ -71,6 +73,8 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAt
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.attempt.event.RMAppAttemptUnregistrationEvent;
 import org.apache.hadoop.yarn.server.timeline.MemoryTimelineStore;
 import org.apache.hadoop.yarn.server.timeline.TimelineStore;
+import org.apache.hadoop.yarn.server.timeline.recovery.MemoryTimelineStateStore;
+import org.apache.hadoop.yarn.server.timeline.recovery.TimelineStateStore;
 import org.apache.hadoop.yarn.webapp.util.WebAppUtils;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -260,8 +264,9 @@ public class MiniYARNCluster extends CompositeService {
       addService(new NodeManagerWrapper(index));
     }
 
-    if (enableAHS) {
-      addService(new ApplicationHistoryServerWrapper());
+    if(conf.getBoolean(YarnConfiguration.TIMELINE_SERVICE_ENABLED,
+        YarnConfiguration.DEFAULT_TIMELINE_SERVICE_ENABLED) || enableAHS) {
+        addService(new ApplicationHistoryServerWrapper());
     }
     
     super.serviceInit(
@@ -285,10 +290,12 @@ public class MiniYARNCluster extends CompositeService {
   }
 
   private synchronized void initResourceManager(int index, Configuration conf) {
-    if (HAUtil.isHAEnabled(conf)) {
-      conf.set(YarnConfiguration.RM_HA_ID, rmIds[index]);
+    Configuration newConf = resourceManagers.length > 1 ?
+        new YarnConfiguration(conf) : conf;
+    if (HAUtil.isHAEnabled(newConf)) {
+      newConf.set(YarnConfiguration.RM_HA_ID, rmIds[index]);
     }
-    resourceManagers[index].init(conf);
+    resourceManagers[index].init(newConf);
     resourceManagers[index].getRMContext().getDispatcher().register(
         RMAppAttemptEventType.class,
         new EventHandler<RMAppAttemptEvent>() {
@@ -327,10 +334,11 @@ public class MiniYARNCluster extends CompositeService {
     } catch (Throwable t) {
       throw new YarnRuntimeException(t);
     }
+    Configuration conf = resourceManagers[index].getConfig();
     LOG.info("MiniYARN ResourceManager address: " +
-        getConfig().get(YarnConfiguration.RM_ADDRESS));
+        conf.get(YarnConfiguration.RM_ADDRESS));
     LOG.info("MiniYARN ResourceManager web address: " +
-        WebAppUtils.getRMWebAppURLWithoutScheme(getConfig()));
+        WebAppUtils.getRMWebAppURLWithoutScheme(conf));
   }
 
   @InterfaceAudience.Private
@@ -350,7 +358,6 @@ public class MiniYARNCluster extends CompositeService {
       resourceManagers[index].stop();
       resourceManagers[index] = null;
     }
-    Configuration conf = getConfig();
     resourceManagers[index] = new ResourceManager();
     initResourceManager(index, getConfig());
     startResourceManager(index);
@@ -431,6 +438,7 @@ public class MiniYARNCluster extends CompositeService {
   private class ResourceManagerWrapper extends AbstractService {
     private int index;
 
+
     public ResourceManagerWrapper(int i) {
       super(ResourceManagerWrapper.class.getName() + "_" + i);
       index = i;
@@ -446,10 +454,11 @@ public class MiniYARNCluster extends CompositeService {
     @Override
     protected synchronized void serviceStart() throws Exception {
       startResourceManager(index);
+      Configuration conf = resourceManagers[index].getConfig();
       LOG.info("MiniYARN ResourceManager address: " +
-               getConfig().get(YarnConfiguration.RM_ADDRESS));
-      LOG.info("MiniYARN ResourceManager web address: " +
-               WebAppUtils.getRMWebAppURLWithoutScheme(getConfig()));
+          conf.get(YarnConfiguration.RM_ADDRESS));
+      LOG.info("MiniYARN ResourceManager web address: " + WebAppUtils
+          .getRMWebAppURLWithoutScheme(conf));
       super.serviceStart();
     }
 
@@ -506,8 +515,10 @@ public class MiniYARNCluster extends CompositeService {
       String logDirsString = prepareDirs("log", numLogDirs);
       config.set(YarnConfiguration.NM_LOG_DIRS, logDirsString);
 
-      // By default AM + 2 containers
-      config.setInt(YarnConfiguration.NM_PMEM_MB, 4*1024);
+      config.setInt(YarnConfiguration.NM_PMEM_MB, config.getInt(
+          YarnConfiguration.YARN_MINICLUSTER_NM_PMEM_MB,
+          YarnConfiguration.DEFAULT_YARN_MINICLUSTER_NM_PMEM_MB));
+
       config.set(YarnConfiguration.NM_ADDRESS,
           MiniYARNCluster.getHostname() + ":0");
       config.set(YarnConfiguration.NM_LOCALIZER_ADDRESS,
@@ -634,6 +645,14 @@ public class MiniYARNCluster extends CompositeService {
               }
               return response;
             }
+
+            @Override
+            public UnRegisterNodeManagerResponse unRegisterNodeManager(
+                UnRegisterNodeManagerRequest request) throws YarnException,
+                IOException {
+              return recordFactory
+                  .newRecordInstance(UnRegisterNodeManagerResponse.class);
+            }
           };
         }
 
@@ -682,38 +701,39 @@ public class MiniYARNCluster extends CompositeService {
           MemoryApplicationHistoryStore.class, ApplicationHistoryStore.class);
       conf.setClass(YarnConfiguration.TIMELINE_SERVICE_STORE,
           MemoryTimelineStore.class, TimelineStore.class);
+      conf.setClass(YarnConfiguration.TIMELINE_SERVICE_STATE_STORE_CLASS,
+          MemoryTimelineStateStore.class, TimelineStateStore.class);
       appHistoryServer.init(conf);
       super.serviceInit(conf);
     }
 
     @Override
     protected synchronized void serviceStart() throws Exception {
-      try {
-        new Thread() {
-          public void run() {
-            appHistoryServer.start();
-          };
-        }.start();
-        int waitCount = 0;
-        while (appHistoryServer.getServiceState() == STATE.INITED
-            && waitCount++ < 60) {
-          LOG.info("Waiting for Timeline Server to start...");
-          Thread.sleep(1500);
-        }
-        if (appHistoryServer.getServiceState() != STATE.STARTED) {
-          // AHS could have failed.
-          throw new IOException(
-              "ApplicationHistoryServer failed to start. Final state is "
-                  + appHistoryServer.getServiceState());
-        }
-        super.serviceStart();
-      } catch (Throwable t) {
-        throw new YarnRuntimeException(t);
+
+      new Thread() {
+        public void run() {
+          appHistoryServer.start();
+        };
+      }.start();
+      int waitCount = 0;
+      while (appHistoryServer.getServiceState() == STATE.INITED
+          && waitCount++ < 60) {
+        LOG.info("Waiting for Timeline Server to start...");
+        Thread.sleep(1500);
+      }
+      if (appHistoryServer.getServiceState() != STATE.STARTED) {
+        // AHS could have failed.
+        IOException ioe = new IOException(
+            "ApplicationHistoryServer failed to start. Final state is "
+            + appHistoryServer.getServiceState());
+        ioe.initCause(appHistoryServer.getFailureCause());
+        throw ioe;
       }
       LOG.info("MiniYARN ApplicationHistoryServer address: "
           + getConfig().get(YarnConfiguration.TIMELINE_SERVICE_ADDRESS));
       LOG.info("MiniYARN ApplicationHistoryServer web address: "
           + getConfig().get(YarnConfiguration.TIMELINE_SERVICE_WEBAPP_ADDRESS));
+      super.serviceStart();
     }
 
     @Override

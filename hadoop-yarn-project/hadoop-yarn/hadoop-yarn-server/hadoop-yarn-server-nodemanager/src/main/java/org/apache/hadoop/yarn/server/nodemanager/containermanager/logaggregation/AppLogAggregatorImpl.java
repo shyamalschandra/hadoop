@@ -44,26 +44,33 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.UnsupportedFileSystemException;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.LogAggregationContext;
+import org.apache.hadoop.yarn.api.records.LogAggregationStatus;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.logaggregation.AggregatedLogFormat.LogKey;
 import org.apache.hadoop.yarn.logaggregation.AggregatedLogFormat.LogValue;
 import org.apache.hadoop.yarn.logaggregation.AggregatedLogFormat.LogWriter;
-import org.apache.hadoop.yarn.logaggregation.ContainerLogsRetentionPolicy;
 import org.apache.hadoop.yarn.logaggregation.LogAggregationUtils;
+import org.apache.hadoop.yarn.server.api.ContainerLogAggregationPolicy;
+import org.apache.hadoop.yarn.server.api.ContainerLogContext;
+import org.apache.hadoop.yarn.server.api.ContainerType;
+import org.apache.hadoop.yarn.server.api.protocolrecords.LogAggregationReport;
+import org.apache.hadoop.yarn.server.nodemanager.containermanager.container.Container;
 import org.apache.hadoop.yarn.server.nodemanager.Context;
 import org.apache.hadoop.yarn.server.nodemanager.DeletionService;
 import org.apache.hadoop.yarn.server.nodemanager.LocalDirsHandlerService;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEvent;
 import org.apache.hadoop.yarn.server.nodemanager.containermanager.application.ApplicationEventType;
 import org.apache.hadoop.yarn.util.ConverterUtils;
+import org.apache.hadoop.yarn.util.Records;
+import org.apache.hadoop.yarn.util.Times;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Predicate;
@@ -104,7 +111,6 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
   private final UserGroupInformation userUgi;
   private final Path remoteNodeLogFileForApp;
   private final Path remoteNodeTmpLogFileForApp;
-  private final ContainerLogsRetentionPolicy retentionPolicy;
 
   private final BlockingQueue<ContainerId> pendingContainers;
   private final AtomicBoolean appFinishing = new AtomicBoolean();
@@ -116,16 +122,21 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
   private final Context context;
   private final int retentionSize;
   private final long rollingMonitorInterval;
+  private final boolean logAggregationInRolling;
   private final NodeId nodeId;
+  // This variable is only for testing
+  private final AtomicBoolean waiting = new AtomicBoolean(false);
+
+  private boolean renameTemporaryLogFileFailed = false;
 
   private final Map<ContainerId, ContainerLogAggregator> containerLogAggregators =
       new HashMap<ContainerId, ContainerLogAggregator>();
+  private final ContainerLogAggregationPolicy logAggPolicy;
 
   public AppLogAggregatorImpl(Dispatcher dispatcher,
       DeletionService deletionService, Configuration conf,
       ApplicationId appId, UserGroupInformation userUgi, NodeId nodeId,
       LocalDirsHandlerService dirsHandler, Path remoteNodeLogFileForApp,
-      ContainerLogsRetentionPolicy retentionPolicy,
       Map<ApplicationAccessType, String> appAcls,
       LogAggregationContext logAggregationContext, Context context,
       FileContext lfs) {
@@ -138,7 +149,6 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     this.dirsHandler = dirsHandler;
     this.remoteNodeLogFileForApp = remoteNodeLogFileForApp;
     this.remoteNodeTmpLogFileForApp = getRemoteNodeTmpLogFileForApp();
-    this.retentionPolicy = retentionPolicy;
     this.pendingContainers = new LinkedBlockingQueue<ContainerId>();
     this.appAcls = appAcls;
     this.lfs = lfs;
@@ -191,9 +201,74 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       }
       this.rollingMonitorInterval = configuredRollingMonitorInterval;
     }
+    this.logAggregationInRolling =
+        this.rollingMonitorInterval <= 0 || this.logAggregationContext == null
+            || this.logAggregationContext.getRolledLogsIncludePattern() == null
+            || this.logAggregationContext.getRolledLogsIncludePattern()
+              .isEmpty() ? false : true;
+    this.logAggPolicy = getLogAggPolicy(conf);
   }
 
-  private void uploadLogsForContainers() {
+  private ContainerLogAggregationPolicy getLogAggPolicy(Configuration conf) {
+    ContainerLogAggregationPolicy policy = getLogAggPolicyInstance(conf);
+    String params = getLogAggPolicyParameters(conf);
+    if (params != null) {
+      policy.parseParameters(params);
+    }
+    return policy;
+  }
+
+  // Use the policy class specified in LogAggregationContext if available.
+  // Otherwise use the cluster-wide default policy class.
+  private ContainerLogAggregationPolicy getLogAggPolicyInstance(
+      Configuration conf) {
+    Class<? extends ContainerLogAggregationPolicy> policyClass = null;
+    if (this.logAggregationContext != null) {
+      String className =
+          this.logAggregationContext.getLogAggregationPolicyClassName();
+      if (className != null) {
+        try {
+          Class<?> policyFromContext = conf.getClassByName(className);
+          if (ContainerLogAggregationPolicy.class.isAssignableFrom(
+              policyFromContext)) {
+            policyClass = policyFromContext.asSubclass(
+                ContainerLogAggregationPolicy.class);
+          } else {
+            LOG.warn(this.appId + " specified invalid log aggregation policy " +
+                className);
+          }
+        } catch (ClassNotFoundException cnfe) {
+          // We don't fail the app if the policy class isn't valid.
+          LOG.warn(this.appId + " specified invalid log aggregation policy " +
+              className);
+        }
+      }
+    }
+    if (policyClass == null) {
+      policyClass = conf.getClass(YarnConfiguration.NM_LOG_AGG_POLICY_CLASS,
+          AllContainerLogAggregationPolicy.class,
+              ContainerLogAggregationPolicy.class);
+    } else {
+      LOG.info(this.appId + " specifies ContainerLogAggregationPolicy of "
+          + policyClass);
+    }
+    return ReflectionUtils.newInstance(policyClass, conf);
+  }
+
+  // Use the policy parameters specified in LogAggregationContext if available.
+  // Otherwise use the cluster-wide default policy parameters.
+  private String getLogAggPolicyParameters(Configuration conf) {
+    String params = null;
+    if (this.logAggregationContext != null) {
+      params = this.logAggregationContext.getLogAggregationPolicyParameters();
+    }
+    if (params == null) {
+      params = conf.get(YarnConfiguration.NM_LOG_AGG_POLICY_CLASS_PARAMETERS);
+    }
+    return params;
+  }
+
+  private void uploadLogsForContainers(boolean appFinished) {
     if (this.logAggregationDisabled) {
       return;
     }
@@ -215,21 +290,22 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     // Create a set of Containers whose logs will be uploaded in this cycle.
     // It includes:
     // a) all containers in pendingContainers: those containers are finished
-    //    and satisfy the retentionPolicy.
+    //    and satisfy the ContainerLogAggregationPolicy.
     // b) some set of running containers: For all the Running containers,
-    // we have ContainerLogsRetentionPolicy.AM_AND_FAILED_CONTAINERS_ONLY,
-    // so simply set wasContainerSuccessful as true to
-    // bypass FAILED_CONTAINERS check and find the running containers 
-    // which satisfy the retentionPolicy.
+    //    we use exitCode of 0 to find those which satisfy the
+    //    ContainerLogAggregationPolicy.
     Set<ContainerId> pendingContainerInThisCycle = new HashSet<ContainerId>();
     this.pendingContainers.drainTo(pendingContainerInThisCycle);
     Set<ContainerId> finishedContainers =
         new HashSet<ContainerId>(pendingContainerInThisCycle);
     if (this.context.getApplications().get(this.appId) != null) {
-      for (ContainerId container : this.context.getApplications()
-        .get(this.appId).getContainers().keySet()) {
-        if (shouldUploadLogs(container, true)) {
-          pendingContainerInThisCycle.add(container);
+      for (Container container : this.context.getApplications()
+        .get(this.appId).getContainers().values()) {
+        ContainerType containerType =
+            container.getContainerTokenIdentifier().getContainerType();
+        if (shouldUploadLogs(new ContainerLogContext(
+            container.getContainerId(), containerType, 0))) {
+          pendingContainerInThisCycle.add(container.getContainerId());
         }
       }
     }
@@ -246,7 +322,7 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
 
       } catch (IOException e1) {
         LOG.error("Cannot create writer for app " + this.applicationId
-            + ". Skip log upload this time. ");
+            + ". Skip log upload this time. ", e1);
         return;
       }
 
@@ -260,13 +336,13 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
           containerLogAggregators.put(container, aggregator);
         }
         Set<Path> uploadedFilePathsInThisCycle =
-            aggregator.doContainerLogAggregation(writer);
+            aggregator.doContainerLogAggregation(writer, appFinished);
         if (uploadedFilePathsInThisCycle.size() > 0) {
           uploadedLogsInThisCycle = true;
+          this.delService.delete(this.userUgi.getShortUserName(), null,
+              uploadedFilePathsInThisCycle
+                  .toArray(new Path[uploadedFilePathsInThisCycle.size()]));
         }
-        this.delService.delete(this.userUgi.getShortUserName(), null,
-          uploadedFilePathsInThisCycle
-            .toArray(new Path[uploadedFilePathsInThisCycle.size()]));
 
         // This container is finished, and all its logs have been uploaded,
         // remove it from containerLogAggregators.
@@ -283,20 +359,24 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
 
       if (writer != null) {
         writer.close();
+        writer = null;
       }
 
+      long currentTime = System.currentTimeMillis();
       final Path renamedPath = this.rollingMonitorInterval <= 0
               ? remoteNodeLogFileForApp : new Path(
                 remoteNodeLogFileForApp.getParent(),
                 remoteNodeLogFileForApp.getName() + "_"
-                    + System.currentTimeMillis());
+                    + currentTime);
 
+      String diagnosticMessage = "";
+      boolean logAggregationSucceedInThisCycle = true;
       final boolean rename = uploadedLogsInThisCycle;
       try {
         userUgi.doAs(new PrivilegedExceptionAction<Object>() {
           @Override
           public Object run() throws Exception {
-            FileSystem remoteFS = FileSystem.get(conf);
+            FileSystem remoteFS = remoteNodeLogFileForApp.getFileSystem(conf);
             if (remoteFS.exists(remoteNodeTmpLogFileForApp)) {
               if (rename) {
                 remoteFS.rename(remoteNodeTmpLogFileForApp, renamedPath);
@@ -307,11 +387,43 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
             return null;
           }
         });
+        diagnosticMessage =
+            "Log uploaded successfully for Application: " + appId
+                + " in NodeManager: "
+                + LogAggregationUtils.getNodeString(nodeId) + " at "
+                + Times.format(currentTime) + "\n";
       } catch (Exception e) {
         LOG.error(
           "Failed to move temporary log file to final location: ["
               + remoteNodeTmpLogFileForApp + "] to ["
               + renamedPath + "]", e);
+        diagnosticMessage =
+            "Log uploaded failed for Application: " + appId
+                + " in NodeManager: "
+                + LogAggregationUtils.getNodeString(nodeId) + " at "
+                + Times.format(currentTime) + "\n";
+        renameTemporaryLogFileFailed = true;
+        logAggregationSucceedInThisCycle = false;
+      }
+
+      LogAggregationReport report =
+          Records.newRecord(LogAggregationReport.class);
+      report.setApplicationId(appId);
+      report.setDiagnosticMessage(diagnosticMessage);
+      report.setLogAggregationStatus(logAggregationSucceedInThisCycle
+          ? LogAggregationStatus.RUNNING
+          : LogAggregationStatus.RUNNING_WITH_FAILURE);
+      this.context.getLogAggregationStatusForApps().add(report);
+      if (appFinished) {
+        // If the app is finished, one extra final report with log aggregation
+        // status SUCCEEDED/FAILED will be sent to RM to inform the RM
+        // that the log aggregation in this NM is completed.
+        LogAggregationReport finalReport =
+            Records.newRecord(LogAggregationReport.class);
+        finalReport.setApplicationId(appId);
+        finalReport.setLogAggregationStatus(renameTemporaryLogFileFailed
+            ? LogAggregationStatus.FAILED : LogAggregationStatus.SUCCEEDED);
+        this.context.getLogAggregationStatusForApps().add(finalReport);
       }
     } finally {
       if (writer != null) {
@@ -378,6 +490,11 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
   public void run() {
     try {
       doAppLogAggregation();
+    } catch (Exception e) {
+      // do post clean up of log directories on any exception
+      LOG.error("Error occured while aggregating the log for the application "
+          + appId, e);
+      doAppLogAggregationPostCleanUp();
     } finally {
       if (!this.appAggregationFinished.get()) {
         LOG.warn("Aggregation did not complete for application " + appId);
@@ -391,12 +508,13 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     while (!this.appFinishing.get() && !this.aborted.get()) {
       synchronized(this) {
         try {
-          if (this.rollingMonitorInterval > 0) {
+          waiting.set(true);
+          if (logAggregationInRolling) {
             wait(this.rollingMonitorInterval * 1000);
             if (this.appFinishing.get() || this.aborted.get()) {
               break;
             }
-            uploadLogsForContainers();
+            uploadLogsForContainers(false);
           } else {
             wait(THREAD_SLEEP_TIME);
           }
@@ -412,8 +530,17 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     }
 
     // App is finished, upload the container logs.
-    uploadLogsForContainers();
+    uploadLogsForContainers(true);
 
+    doAppLogAggregationPostCleanUp();
+
+    this.dispatcher.getEventHandler().handle(
+        new ApplicationEvent(this.appId,
+            ApplicationEventType.APPLICATION_LOG_HANDLING_FINISHED));
+    this.appAggregationFinished.set(true);
+  }
+
+  private void doAppLogAggregationPostCleanUp() {
     // Remove the local app-log-dirs
     List<Path> localAppLogDirs = new ArrayList<Path>();
     for (String rootLogDir : dirsHandler.getLogDirsForCleanup()) {
@@ -434,11 +561,6 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       this.delService.delete(this.userUgi.getShortUserName(), null,
         localAppLogDirs.toArray(new Path[localAppLogDirs.size()]));
     }
-    
-    this.dispatcher.getEventHandler().handle(
-        new ApplicationEvent(this.appId,
-            ApplicationEventType.APPLICATION_LOG_HANDLING_FINISHED));
-    this.appAggregationFinished.set(true);    
   }
 
   private Path getRemoteNodeTmpLogFileForApp() {
@@ -448,46 +570,16 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
 
   // TODO: The condition: containerId.getId() == 1 to determine an AM container
   // is not always true.
-  private boolean shouldUploadLogs(ContainerId containerId,
-      boolean wasContainerSuccessful) {
-
-    // All containers
-    if (this.retentionPolicy
-        .equals(ContainerLogsRetentionPolicy.ALL_CONTAINERS)) {
-      return true;
-    }
-
-    // AM Container only
-    if (this.retentionPolicy
-        .equals(ContainerLogsRetentionPolicy.APPLICATION_MASTER_ONLY)) {
-      if ((containerId.getContainerId()
-          & ContainerId.CONTAINER_ID_BITMASK)== 1) {
-        return true;
-      }
-      return false;
-    }
-
-    // AM + Failing containers
-    if (this.retentionPolicy
-        .equals(ContainerLogsRetentionPolicy.AM_AND_FAILED_CONTAINERS_ONLY)) {
-      if ((containerId.getContainerId()
-          & ContainerId.CONTAINER_ID_BITMASK) == 1) {
-        return true;
-      } else if(!wasContainerSuccessful) {
-        return true;
-      }
-      return false;
-    }
-    return false;
+  private boolean shouldUploadLogs(ContainerLogContext logContext) {
+    return logAggPolicy.shouldDoLogAggregation(logContext);
   }
 
   @Override
-  public void startContainerLogAggregation(ContainerId containerId,
-      boolean wasContainerSuccessful) {
-    if (shouldUploadLogs(containerId, wasContainerSuccessful)) {
-      LOG.info("Considering container " + containerId
+  public void startContainerLogAggregation(ContainerLogContext logContext) {
+    if (shouldUploadLogs(logContext)) {
+      LOG.info("Considering container " + logContext.getContainerId()
           + " for log-aggregation");
-      this.pendingContainers.add(containerId);
+      this.pendingContainers.add(logContext.getContainerId());
     }
   }
 
@@ -505,9 +597,26 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
     this.notifyAll();
   }
 
+  @Override
+  public void disableLogAggregation() {
+    this.logAggregationDisabled = true;
+  }
+
   @Private
   @VisibleForTesting
+  // This is only used for testing.
+  // This will wake the log aggregation thread that is waiting for
+  // rollingMonitorInterval.
+  // To use this method, make sure the log aggregation thread is running
+  // and waiting for rollingMonitorInterval.
   public synchronized void doLogAggregationOutOfBand() {
+    while(!waiting.get()) {
+      try {
+        wait(200);
+      } catch (InterruptedException e) {
+        // Do Nothing
+      }
+    }
     LOG.info("Do OutOfBand log aggregation");
     this.notifyAll();
   }
@@ -521,20 +630,21 @@ public class AppLogAggregatorImpl implements AppLogAggregator {
       this.containerId = containerId;
     }
 
-    public Set<Path> doContainerLogAggregation(LogWriter writer) {
+    public Set<Path> doContainerLogAggregation(LogWriter writer,
+        boolean appFinished) {
       LOG.info("Uploading logs for container " + containerId
           + ". Current good log dirs are "
-          + StringUtils.join(",", dirsHandler.getLogDirs()));
+          + StringUtils.join(",", dirsHandler.getLogDirsForRead()));
       final LogKey logKey = new LogKey(containerId);
       final LogValue logValue =
-          new LogValue(dirsHandler.getLogDirs(), containerId,
+          new LogValue(dirsHandler.getLogDirsForRead(), containerId,
             userUgi.getShortUserName(), logAggregationContext,
-            this.uploadedFileMeta);
+            this.uploadedFileMeta, appFinished);
       try {
         writer.append(logKey, logValue);
       } catch (Exception e) {
         LOG.error("Couldn't upload logs for " + containerId
-            + ". Skipping this container.");
+            + ". Skipping this container.", e);
         return new HashSet<Path>();
       }
       this.uploadedFileMeta.addAll(logValue

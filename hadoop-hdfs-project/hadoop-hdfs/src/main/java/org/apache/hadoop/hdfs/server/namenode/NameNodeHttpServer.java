@@ -27,8 +27,10 @@ import javax.servlet.ServletContext;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.hdfs.server.common.JspHelper;
 import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
 import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
@@ -67,30 +69,28 @@ public class NameNodeHttpServer {
   }
 
   private void initWebHdfs(Configuration conf) throws IOException {
-    if (WebHdfsFileSystem.isEnabled(conf, HttpServer2.LOG)) {
-      // set user pattern based on configuration file
-      UserParam.setUserPattern(conf.get(
-          DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY,
-          DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
+    // set user pattern based on configuration file
+    UserParam.setUserPattern(conf.get(
+        HdfsClientConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY,
+        HdfsClientConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
 
-      // add authentication filter for webhdfs
-      final String className = conf.get(
-          DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_KEY,
-          DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_DEFAULT);
-      final String name = className;
+    // add authentication filter for webhdfs
+    final String className = conf.get(
+        DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_KEY,
+        DFSConfigKeys.DFS_WEBHDFS_AUTHENTICATION_FILTER_DEFAULT);
+    final String name = className;
 
-      final String pathSpec = WebHdfsFileSystem.PATH_PREFIX + "/*";
-      Map<String, String> params = getAuthFilterParams(conf);
-      HttpServer2.defineFilter(httpServer.getWebAppContext(), name, className,
-          params, new String[] { pathSpec });
-      HttpServer2.LOG.info("Added filter '" + name + "' (class=" + className
-          + ")");
+    final String pathSpec = WebHdfsFileSystem.PATH_PREFIX + "/*";
+    Map<String, String> params = getAuthFilterParams(conf);
+    HttpServer2.defineFilter(httpServer.getWebAppContext(), name, className,
+        params, new String[] { pathSpec });
+    HttpServer2.LOG.info("Added filter '" + name + "' (class=" + className
+        + ")");
 
-      // add webhdfs packages
-      httpServer.addJerseyResourcePackage(NamenodeWebHdfsMethods.class
-          .getPackage().getName() + ";" + Param.class.getPackage().getName(),
-          pathSpec);
-    }
+    // add webhdfs packages
+    httpServer.addJerseyResourcePackage(NamenodeWebHdfsMethods.class
+        .getPackage().getName() + ";" + Param.class.getPackage().getName(),
+        pathSpec);
   }
 
   /**
@@ -103,7 +103,7 @@ public class NameNodeHttpServer {
     final String infoHost = bindAddress.getHostName();
 
     final InetSocketAddress httpAddr = bindAddress;
-    final String httpsAddrString = conf.get(
+    final String httpsAddrString = conf.getTrimmed(
         DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_KEY,
         DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_DEFAULT);
     InetSocketAddress httpsAddr = NetUtils.createSocketAddr(httpsAddrString);
@@ -127,7 +127,7 @@ public class NameNodeHttpServer {
 
     if (policy.isHttpsEnabled()) {
       // assume same ssl port for all datanodes
-      InetSocketAddress datanodeSslPort = NetUtils.createSocketAddr(conf.get(
+      InetSocketAddress datanodeSslPort = NetUtils.createSocketAddr(conf.getTrimmed(
           DFSConfigKeys.DFS_DATANODE_HTTPS_ADDRESS_KEY, infoHost + ":"
               + DFSConfigKeys.DFS_DATANODE_HTTPS_DEFAULT_PORT));
       httpServer.setAttribute(DFSConfigKeys.DFS_DATANODE_HTTPS_PORT_KEY,
@@ -272,5 +272,9 @@ public class NameNodeHttpServer {
   static StartupProgress getStartupProgressFromContext(
       ServletContext context) {
     return (StartupProgress)context.getAttribute(STARTUP_PROGRESS_ATTRIBUTE_KEY);
+  }
+
+  public static HAServiceProtocol.HAServiceState getNameNodeStateFromContext(ServletContext context) {
+    return getNameNodeFromContext(context).getServiceState();
   }
 }

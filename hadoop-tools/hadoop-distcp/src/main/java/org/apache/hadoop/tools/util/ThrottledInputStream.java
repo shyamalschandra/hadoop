@@ -39,7 +39,7 @@ import com.google.common.base.Preconditions;
 public class ThrottledInputStream extends InputStream {
 
   private final InputStream rawStream;
-  private final long maxBytesPerSec;
+  private final float maxBytesPerSec;
   private final long startTime = System.currentTimeMillis();
 
   private long bytesRead = 0;
@@ -51,8 +51,8 @@ public class ThrottledInputStream extends InputStream {
     this(rawStream, Long.MAX_VALUE);
   }
 
-  public ThrottledInputStream(InputStream rawStream, long maxBytesPerSec) {
-    assert maxBytesPerSec > 0 : "Bandwidth " + maxBytesPerSec + " is invalid"; 
+  public ThrottledInputStream(InputStream rawStream, float maxBytesPerSec) {
+    assert maxBytesPerSec > 0 : "Bandwidth " + maxBytesPerSec + " is invalid";
     this.rawStream = rawStream;
     this.maxBytesPerSec = maxBytesPerSec;
   }
@@ -62,7 +62,7 @@ public class ThrottledInputStream extends InputStream {
     rawStream.close();
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public int read() throws IOException {
     throttle();
@@ -73,7 +73,7 @@ public class ThrottledInputStream extends InputStream {
     return data;
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public int read(byte[] b) throws IOException {
     throttle();
@@ -84,7 +84,7 @@ public class ThrottledInputStream extends InputStream {
     return readLen;
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public int read(byte[] b, int off, int len) throws IOException {
     throttle();
@@ -115,7 +115,7 @@ public class ThrottledInputStream extends InputStream {
   }
 
   private void throttle() throws IOException {
-    if (getBytesPerSec() > maxBytesPerSec) {
+    while (getBytesPerSec() > maxBytesPerSec) {
       try {
         Thread.sleep(SLEEP_DURATION_MS);
         totalSleepTime += SLEEP_DURATION_MS;
@@ -155,7 +155,7 @@ public class ThrottledInputStream extends InputStream {
     return totalSleepTime;
   }
 
-  /** @inheritDoc */
+  /** {@inheritDoc} */
   @Override
   public String toString() {
     return "ThrottledInputStream{" +

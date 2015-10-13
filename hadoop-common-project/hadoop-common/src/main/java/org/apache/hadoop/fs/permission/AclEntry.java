@@ -106,7 +106,7 @@ public class AclEntry {
       sb.append("default:");
     }
     if (type != null) {
-      sb.append(type.toString().toLowerCase());
+      sb.append(StringUtils.toLowerCase(type.toString()));
     }
     sb.append(':');
     if (name != null) {
@@ -146,7 +146,9 @@ public class AclEntry {
      * @return Builder this builder, for call chaining
      */
     public Builder setName(String name) {
-      this.name = name;
+      if (name != null && !name.isEmpty()) {
+        this.name = name;
+      }
       return this;
     }
 
@@ -261,7 +263,8 @@ public class AclEntry {
 
     AclEntryType aclType = null;
     try {
-      aclType = Enum.valueOf(AclEntryType.class, split[index].toUpperCase());
+      aclType = Enum.valueOf(
+          AclEntryType.class, StringUtils.toUpperCase(split[index]));
       builder.setType(aclType);
       index++;
     } catch (IllegalArgumentException iae) {

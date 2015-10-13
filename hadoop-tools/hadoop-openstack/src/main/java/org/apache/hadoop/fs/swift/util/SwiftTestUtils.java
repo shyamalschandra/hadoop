@@ -165,7 +165,7 @@ public class SwiftTestUtils extends org.junit.Assert {
   }
 
   /**
-   * Read the file and convert to a byte dataaset
+   * Read the file and convert to a byte dataset
    * @param fs filesystem
    * @param path path to read from
    * @param len length of data to read
@@ -185,7 +185,7 @@ public class SwiftTestUtils extends org.junit.Assert {
   }
 
   /**
-   * Assert that tthe array src[0..len] and dest[] are equal
+   * Assert that the array src[0..len] and dest[] are equal
    * @param src source data
    * @param dest actual
    * @param len length of bytes to compare
@@ -219,9 +219,9 @@ public class SwiftTestUtils extends org.junit.Assert {
         byte actual = dest[i];
         byte expected = src[i];
         String letter = toChar(actual);
-        String line = String.format("[%04d] %2x %s\n", i, actual, letter);
+        String line = String.format("[%04d] %2x %s%n", i, actual, letter);
         if (expected != actual) {
-          line = String.format("[%04d] %2x %s -expected %2x %s\n",
+          line = String.format("[%04d] %2x %s -expected %2x %s%n",
                                i,
                                actual,
                                letter,
@@ -236,7 +236,7 @@ public class SwiftTestUtils extends org.junit.Assert {
 
   /**
    * Convert a byte to a character for printing. If the
-   * byte value is < 32 -and hence unprintable- the byte is
+   * byte value is &lt; 32 -and hence unprintable- the byte is
    * returned as a two digit hex value
    * @param b byte
    * @return the printable character string
@@ -522,7 +522,7 @@ public class SwiftTestUtils extends org.junit.Assert {
    * @param fs filesystem
    * @param dir directory to scan
    * @param subdir full path to look for
-   * @throws IOException IO probles
+   * @throws IOException IO problems
    */
   public static void assertListStatusFinds(FileSystem fs,
                                            Path dir,

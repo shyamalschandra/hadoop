@@ -52,6 +52,7 @@ import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.util.StringUtils;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -197,7 +198,7 @@ public class TestSafeMode {
     
     String status = nn.getNamesystem().getSafemode();
     assertEquals("Safe mode is ON. The reported blocks 0 needs additional " +
-        "15 blocks to reach the threshold 0.9990 of total blocks 15." + NEWLINE +
+        "14 blocks to reach the threshold 0.9990 of total blocks 15." + NEWLINE +
         "The number of live datanodes 0 has reached the minimum number 0. " +
         "Safe mode will be turned off automatically once the thresholds " +
         "have been reached.", status);
@@ -292,9 +293,13 @@ public class TestSafeMode {
     try {
       f.run(fs);
       fail(msg);
-     } catch (IOException ioe) {
-       assertTrue(ioe.getMessage().contains("safe mode"));
-     }
+    } catch (RemoteException re) {
+      assertEquals(SafeModeException.class.getName(), re.getClassName());
+      GenericTestUtils.assertExceptionContains("Name node is in safe mode", re);
+    } catch (SafeModeException ignored) {
+    } catch (IOException ioe) {
+      fail(msg + " " + StringUtils.stringifyException(ioe));
+    }
   }
 
   /**
@@ -339,6 +344,12 @@ public class TestSafeMode {
       @Override
       public void run(FileSystem fs) throws IOException {
         DFSTestUtil.appendFile(fs, file1, "new bytes");
+      }});
+
+    runFsFun("Truncate file while in SM", new FSRun() {
+      @Override
+      public void run(FileSystem fs) throws IOException {
+        fs.truncate(file1, 0);
       }});
 
     runFsFun("Delete file while in SM", new FSRun() {
@@ -541,7 +552,7 @@ public class TestSafeMode {
       if(cluster!= null) cluster.shutdown();
     }
   }
-  
+
   void checkGetBlockLocationsWorks(FileSystem fs, Path fileName) throws IOException {
     FileStatus stat = fs.getFileStatus(fileName);
     try {  
@@ -549,7 +560,7 @@ public class TestSafeMode {
     } catch (SafeModeException e) {
       assertTrue("Should have not got safemode exception", false);
     } catch (RemoteException re) {
-      assertTrue("Should have not got safemode exception", false);   
+      assertTrue("Should have not got remote exception", false);
     }    
   }
 }

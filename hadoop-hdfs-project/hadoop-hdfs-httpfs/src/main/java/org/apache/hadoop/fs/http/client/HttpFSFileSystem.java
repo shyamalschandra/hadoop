@@ -78,7 +78,7 @@ import java.util.Map;
 
 /**
  * HttpFSServer implementation of the FileSystemAccess FileSystem.
- * <p/>
+ * <p>
  * This implementation allows a user to access HDFS over HTTP via a HttpFSServer server.
  */
 @InterfaceAudience.Private
@@ -109,11 +109,14 @@ public class HttpFSFileSystem extends FileSystem
   public static final String XATTR_VALUE_PARAM = "xattr.value";
   public static final String XATTR_SET_FLAG_PARAM = "flag";
   public static final String XATTR_ENCODING_PARAM = "encoding";
+  public static final String NEW_LENGTH_PARAM = "newlength";
 
   public static final Short DEFAULT_PERMISSION = 0755;
   public static final String ACLSPEC_DEFAULT = "";
 
   public static final String RENAME_JSON = "boolean";
+
+  public static final String TRUNCATE_JSON = "boolean";
 
   public static final String DELETE_JSON = "boolean";
 
@@ -191,7 +194,7 @@ public class HttpFSFileSystem extends FileSystem
     GETHOMEDIRECTORY(HTTP_GET), GETCONTENTSUMMARY(HTTP_GET),
     GETFILECHECKSUM(HTTP_GET),  GETFILEBLOCKLOCATIONS(HTTP_GET),
     INSTRUMENTATION(HTTP_GET), GETACLSTATUS(HTTP_GET),
-    APPEND(HTTP_POST), CONCAT(HTTP_POST),
+    APPEND(HTTP_POST), CONCAT(HTTP_POST), TRUNCATE(HTTP_POST),
     CREATE(HTTP_PUT), MKDIRS(HTTP_PUT), RENAME(HTTP_PUT), SETOWNER(HTTP_PUT),
     SETPERMISSION(HTTP_PUT), SETREPLICATION(HTTP_PUT), SETTIMES(HTTP_PUT),
     MODIFYACLENTRIES(HTTP_PUT), REMOVEACLENTRIES(HTTP_PUT),
@@ -223,7 +226,7 @@ public class HttpFSFileSystem extends FileSystem
   /**
    * Convenience method that creates a <code>HttpURLConnection</code> for the
    * HttpFSServer file system operations.
-   * <p/>
+   * <p>
    * This methods performs and injects any needed authentication credentials
    * via the {@link #getConnection(URL, String)} method
    *
@@ -235,7 +238,7 @@ public class HttpFSFileSystem extends FileSystem
    * @return a <code>HttpURLConnection</code> for the HttpFSServer server,
    *         authenticated and ready to use for the specified path and file system operation.
    *
-   * @throws IOException thrown if an IO error occurrs.
+   * @throws IOException thrown if an IO error occurs.
    */
   private HttpURLConnection getConnection(final String method,
       Map<String, String> params, Path path, boolean makeQualified)
@@ -260,7 +263,7 @@ public class HttpFSFileSystem extends FileSystem
    *         HttpFSServer server, authenticated and ready to use for the
    *         specified path and file system operation.
    *
-   * @throws IOException thrown if an IO error occurrs.
+   * @throws IOException thrown if an IO error occurs.
    */
   private HttpURLConnection getConnection(final String method,
       Map<String, String> params, Map<String, List<String>> multiValuedParams,
@@ -289,7 +292,7 @@ public class HttpFSFileSystem extends FileSystem
 
   /**
    * Convenience method that creates a <code>HttpURLConnection</code> for the specified URL.
-   * <p/>
+   * <p>
    * This methods performs and injects any needed authentication credentials.
    *
    * @param url url to connect to.
@@ -298,7 +301,7 @@ public class HttpFSFileSystem extends FileSystem
    * @return a <code>HttpURLConnection</code> for the HttpFSServer server, authenticated and ready to use for
    *         the specified path and file system operation.
    *
-   * @throws IOException thrown if an IO error occurrs.
+   * @throws IOException thrown if an IO error occurs.
    */
   private HttpURLConnection getConnection(URL url, String method) throws IOException {
     try {
@@ -371,7 +374,7 @@ public class HttpFSFileSystem extends FileSystem
 
   /**
    * HttpFSServer subclass of the <code>FSDataInputStream</code>.
-   * <p/>
+   * <p>
    * This implementation does not support the
    * <code>PositionReadable</code> and <code>Seekable</code> methods.
    */
@@ -414,8 +417,8 @@ public class HttpFSFileSystem extends FileSystem
 
   /**
    * Opens an FSDataInputStream at the indicated Path.
-   * </p>
-   * IMPORTANT: the returned <code><FSDataInputStream/code> does not support the
+   * <p>
+   * IMPORTANT: the returned <code>FSDataInputStream</code> does not support the
    * <code>PositionReadable</code> and <code>Seekable</code> methods.
    *
    * @param f the file name to open
@@ -434,7 +437,7 @@ public class HttpFSFileSystem extends FileSystem
 
   /**
    * HttpFSServer subclass of the <code>FSDataOutputStream</code>.
-   * <p/>
+   * <p>
    * This implementation closes the underlying HTTP connection validating the Http connection status
    * at closing time.
    */
@@ -516,7 +519,7 @@ public class HttpFSFileSystem extends FileSystem
   /**
    * Opens an FSDataOutputStream at the indicated Path with write-progress
    * reporting.
-   * <p/>
+   * <p>
    * IMPORTANT: The <code>Progressable</code> parameter is not used.
    *
    * @param f the file name to open.
@@ -549,7 +552,7 @@ public class HttpFSFileSystem extends FileSystem
 
   /**
    * Append to an existing file (optional operation).
-   * <p/>
+   * <p>
    * IMPORTANT: The <code>Progressable</code> parameter is not used.
    *
    * @param f the existing file to be appended.
@@ -565,6 +568,25 @@ public class HttpFSFileSystem extends FileSystem
     params.put(OP_PARAM, Operation.APPEND.toString());
     return uploadData(Operation.APPEND.getMethod(), f, params, bufferSize,
                       HttpURLConnection.HTTP_OK);
+  }
+
+  /**
+   * Truncate a file.
+   * 
+   * @param f the file to be truncated.
+   * @param newLength The size the file is to be truncated to.
+   *
+   * @throws IOException
+   */
+  @Override
+  public boolean truncate(Path f, long newLength) throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.TRUNCATE.toString());
+    params.put(NEW_LENGTH_PARAM, Long.toString(newLength));
+    HttpURLConnection conn = getConnection(Operation.TRUNCATE.getMethod(),
+        params, f, true);
+    JSONObject json = (JSONObject) HttpFSUtils.jsonParse(conn);
+    return (Boolean) json.get(TRUNCATE_JSON);
   }
 
   /**
@@ -838,7 +860,7 @@ public class HttpFSFileSystem extends FileSystem
    * Modify the ACL entries for a file.
    *
    * @param path Path to modify
-   * @param aclSpec List<AclEntry> describing modifications
+   * @param aclSpec describing modifications
    * @throws IOException
    */
   @Override
@@ -855,7 +877,7 @@ public class HttpFSFileSystem extends FileSystem
   /**
    * Remove the specified ACL entries from a file
    * @param path Path to modify
-   * @param aclSpec List<AclEntry> describing entries to remove
+   * @param aclSpec describing entries to remove
    * @throws IOException
    */
   @Override
@@ -900,7 +922,7 @@ public class HttpFSFileSystem extends FileSystem
   /**
    * Set the ACLs for the given file
    * @param path Path to modify
-   * @param aclSpec List<AclEntry> describing modifications, must include
+   * @param aclSpec describing modifications, must include
    *                entries for user, group, and others for compatibility
    *                with permission bits.
    * @throws IOException
@@ -991,13 +1013,13 @@ public class HttpFSFileSystem extends FileSystem
     HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
     JSONObject json = (JSONObject) ((JSONObject)
       HttpFSUtils.jsonParse(conn)).get(CONTENT_SUMMARY_JSON);
-    return new ContentSummary((Long) json.get(CONTENT_SUMMARY_LENGTH_JSON),
-                              (Long) json.get(CONTENT_SUMMARY_FILE_COUNT_JSON),
-                              (Long) json.get(CONTENT_SUMMARY_DIRECTORY_COUNT_JSON),
-                              (Long) json.get(CONTENT_SUMMARY_QUOTA_JSON),
-                              (Long) json.get(CONTENT_SUMMARY_SPACE_CONSUMED_JSON),
-                              (Long) json.get(CONTENT_SUMMARY_SPACE_QUOTA_JSON)
-    );
+    return new ContentSummary.Builder().
+        length((Long) json.get(CONTENT_SUMMARY_LENGTH_JSON)).
+        fileCount((Long) json.get(CONTENT_SUMMARY_FILE_COUNT_JSON)).
+        directoryCount((Long) json.get(CONTENT_SUMMARY_DIRECTORY_COUNT_JSON)).
+        quota((Long) json.get(CONTENT_SUMMARY_QUOTA_JSON)).
+        spaceConsumed((Long) json.get(CONTENT_SUMMARY_SPACE_CONSUMED_JSON)).
+        spaceQuota((Long) json.get(CONTENT_SUMMARY_SPACE_QUOTA_JSON)).build();
   }
 
   @Override

@@ -43,6 +43,9 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.mapred.InvalidJobConfException;
+import org.apache.hadoop.mapred.JobConf;
+import org.apache.hadoop.mapred.Task;
+import org.apache.hadoop.mapred.TaskLog;
 import org.apache.hadoop.mapreduce.JobID;
 import org.apache.hadoop.mapreduce.MRConfig;
 import org.apache.hadoop.mapreduce.MRJobConfig;
@@ -59,6 +62,7 @@ import org.apache.hadoop.mapreduce.v2.api.records.TaskType;
 import org.apache.hadoop.util.ApplicationClassLoader;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.yarn.ContainerLogAppender;
+import org.apache.hadoop.yarn.ContainerRollingLogAppender;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
 import org.apache.hadoop.yarn.api.records.LocalResource;
@@ -68,7 +72,6 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.util.Apps;
 import org.apache.hadoop.yarn.util.ConverterUtils;
-import org.apache.log4j.RollingFileAppender;
 
 /**
  * Helper class for MR applications
@@ -238,7 +241,7 @@ public class MRApps extends Apps {
     boolean userClassesTakesPrecedence = 
       conf.getBoolean(MRJobConfig.MAPREDUCE_JOB_USER_CLASSPATH_FIRST, false);
 
-    String classpathEnvVar = 
+    String classpathEnvVar =
       conf.getBoolean(MRJobConfig.MAPREDUCE_JOB_CLASSLOADER, false)
         ? Environment.APP_CLASSPATH.name() : Environment.CLASSPATH.name();
 
@@ -300,7 +303,7 @@ public class MRApps extends Apps {
               remoteFS.getWorkingDirectory()));
           String name = (null == u.getFragment())
               ? p.getName() : u.getFragment();
-          if (!name.toLowerCase().endsWith(".jar")) {
+          if (!StringUtils.toLowerCase(name).endsWith(".jar")) {
             linkLookup.put(p, name);
           }
         }
@@ -314,7 +317,7 @@ public class MRApps extends Apps {
         if (name == null) {
           name = p.getName();
         }
-        if(!name.toLowerCase().endsWith(".jar")) {
+        if(!StringUtils.toLowerCase(name).endsWith(".jar")) {
           MRApps.addToEnvironment(
               environment,
               classpathEnvVar,
@@ -342,7 +345,7 @@ public class MRApps extends Apps {
    * {@link MRJobConfig#MAPREDUCE_JOB_CLASSLOADER} is set to true, and
    * the APP_CLASSPATH environment variable is set.
    * @param conf
-   * @returns the created job classloader, or null if the job classloader is not
+   * @return the created job classloader, or null if the job classloader is not
    * enabled or the APP_CLASSPATH environment variable is not set
    * @throws IOException
    */
@@ -375,7 +378,7 @@ public class MRApps extends Apps {
   public static void setClassLoader(ClassLoader classLoader,
       Configuration conf) {
     if (classLoader != null) {
-      LOG.info("Setting classloader " + classLoader.getClass().getName() +
+      LOG.info("Setting classloader " + classLoader +
           " on the configuration and as the thread context classloader");
       conf.setClassLoader(classLoader);
       Thread.currentThread().setContextClassLoader(classLoader);
@@ -592,18 +595,32 @@ public class MRApps extends Apps {
     }
     return result;
   }
+
+  public static String getChildLogLevel(Configuration conf, boolean isMap) {
+    if (isMap) {
+      return conf.get(
+          MRJobConfig.MAP_LOG_LEVEL,
+          JobConf.DEFAULT_LOG_LEVEL.toString()
+      );
+    } else {
+      return conf.get(
+          MRJobConfig.REDUCE_LOG_LEVEL,
+          JobConf.DEFAULT_LOG_LEVEL.toString()
+      );
+    }
+  }
   
   /**
-   * Add the JVM system properties necessary to configure {@link ContainerLogAppender}.
-   * @param logLevel the desired log level (eg INFO/WARN/DEBUG)
-   * @param logSize See {@link ContainerLogAppender#setTotalLogFileSize(long)}
-   * @param numBackups See {@link RollingFileAppender#setMaxBackupIndex(int)}
+   * Add the JVM system properties necessary to configure
+   *  {@link ContainerLogAppender} or
+   *  {@link ContainerRollingLogAppender}.
+   *
+   * @param task for map/reduce, or null for app master
    * @param vargs the argument list to append to
    * @param conf configuration of MR job
    */
-  public static void addLog4jSystemProperties(
-      String logLevel, long logSize, int numBackups, List<String> vargs, 
-      Configuration conf) {
+  public static void addLog4jSystemProperties(Task task,
+      List<String> vargs, Configuration conf) {
     String log4jPropertyFile =
         conf.get(MRJobConfig.MAPREDUCE_JOB_LOG4J_PROPERTIES_FILE, "");
     if (log4jPropertyFile.isEmpty()) {
@@ -618,11 +635,30 @@ public class MRApps extends Apps {
       Path log4jPath = new Path(log4jURI);
       vargs.add("-Dlog4j.configuration="+log4jPath.getName());
     }
-    
+
+    long logSize;
+    String logLevel;
+    int numBackups;
+
+    if (task == null) {
+      logSize = conf.getLong(MRJobConfig.MR_AM_LOG_KB,
+          MRJobConfig.DEFAULT_MR_AM_LOG_KB) << 10;
+      logLevel = conf.get(
+          MRJobConfig.MR_AM_LOG_LEVEL, MRJobConfig.DEFAULT_MR_AM_LOG_LEVEL);
+      numBackups = conf.getInt(MRJobConfig.MR_AM_LOG_BACKUPS,
+          MRJobConfig.DEFAULT_MR_AM_LOG_BACKUPS);
+    } else {
+      logSize = TaskLog.getTaskLogLimitBytes(conf);
+      logLevel = getChildLogLevel(conf, task.isMapTask());
+      numBackups = conf.getInt(MRJobConfig.TASK_LOG_BACKUPS,
+          MRJobConfig.DEFAULT_TASK_LOG_BACKUPS);
+    }
+
     vargs.add("-D" + YarnConfiguration.YARN_APP_CONTAINER_LOG_DIR + "=" +
         ApplicationConstants.LOG_DIR_EXPANSION_VAR);
     vargs.add(
         "-D" + YarnConfiguration.YARN_APP_CONTAINER_LOG_SIZE + "=" + logSize);
+
     if (logSize > 0L && numBackups > 0) {
       // log should be rolled
       vargs.add("-D" + YarnConfiguration.YARN_APP_CONTAINER_LOG_BACKUPS + "="
@@ -630,6 +666,30 @@ public class MRApps extends Apps {
       vargs.add("-Dhadoop.root.logger=" + logLevel + ",CRLA");
     } else {
       vargs.add("-Dhadoop.root.logger=" + logLevel + ",CLA");
+    }
+    vargs.add("-Dhadoop.root.logfile=" + TaskLog.LogName.SYSLOG);
+
+    if (   task != null
+        && !task.isMapTask()
+        && conf.getBoolean(MRJobConfig.REDUCE_SEPARATE_SHUFFLE_LOG,
+               MRJobConfig.DEFAULT_REDUCE_SEPARATE_SHUFFLE_LOG)) {
+      final int numShuffleBackups = conf.getInt(MRJobConfig.SHUFFLE_LOG_BACKUPS,
+          MRJobConfig.DEFAULT_SHUFFLE_LOG_BACKUPS);
+      final long shuffleLogSize = conf.getLong(MRJobConfig.SHUFFLE_LOG_KB,
+          MRJobConfig.DEFAULT_SHUFFLE_LOG_KB) << 10;
+      final String shuffleLogger = logLevel
+          + (shuffleLogSize > 0L && numShuffleBackups > 0
+                 ? ",shuffleCRLA"
+                 : ",shuffleCLA");
+
+      vargs.add("-D" + MRJobConfig.MR_PREFIX
+          + "shuffle.logger=" + shuffleLogger);
+      vargs.add("-D" + MRJobConfig.MR_PREFIX
+          + "shuffle.logfile=" + TaskLog.LogName.SYSLOG + ".shuffle");
+      vargs.add("-D" + MRJobConfig.MR_PREFIX
+          + "shuffle.log.filesize=" + shuffleLogSize);
+      vargs.add("-D" + MRJobConfig.MR_PREFIX
+          + "shuffle.log.backups=" + numShuffleBackups);
     }
   }
 
@@ -687,7 +747,7 @@ public class MRApps extends Apps {
   public static String crossPlatformifyMREnv(Configuration conf, Environment env) {
     boolean crossPlatform =
         conf.getBoolean(MRConfig.MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM,
-          MRConfig.DEFAULT_MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM);
+            MRConfig.DEFAULT_MAPREDUCE_APP_SUBMISSION_CROSS_PLATFORM);
     return crossPlatform ? env.$$() : env.$();
   }
 }

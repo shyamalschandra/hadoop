@@ -44,6 +44,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.metrics2.MetricsFilter;
 import org.apache.hadoop.metrics2.MetricsPlugin;
 import org.apache.hadoop.metrics2.filter.GlobFilter;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * Metrics configuration for MetricsSystemImpl
@@ -56,6 +57,9 @@ class MetricsConfig extends SubsetConfiguration {
 
   static final String PERIOD_KEY = "period";
   static final int PERIOD_DEFAULT = 10; // seconds
+
+  // For testing, this will have the priority.
+  static final String PERIOD_MILLIS_KEY = "periodMillis";
 
   static final String QUEUE_CAPACITY_KEY = "queue.capacity";
   static final int QUEUE_CAPACITY_DEFAULT = 1;
@@ -85,12 +89,12 @@ class MetricsConfig extends SubsetConfiguration {
   private ClassLoader pluginLoader;
 
   MetricsConfig(Configuration c, String prefix) {
-    super(c, prefix.toLowerCase(Locale.US), ".");
+    super(c, StringUtils.toLowerCase(prefix), ".");
   }
 
   static MetricsConfig create(String prefix) {
-    return loadFirst(prefix, "hadoop-metrics2-"+ prefix.toLowerCase(Locale.US)
-                     +".properties", DEFAULT_FILE_NAME);
+    return loadFirst(prefix, "hadoop-metrics2-" +
+        StringUtils.toLowerCase(prefix) + ".properties", DEFAULT_FILE_NAME);
   }
 
   static MetricsConfig create(String prefix, String... fileNames) {
@@ -269,14 +273,14 @@ class MetricsConfig extends SubsetConfiguration {
 
   static String toString(Configuration c) {
     ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-    PrintStream ps = new PrintStream(buffer);
-    PropertiesConfiguration tmp = new PropertiesConfiguration();
-    tmp.copy(c);
     try {
+      PrintStream ps = new PrintStream(buffer, false, "UTF-8");
+      PropertiesConfiguration tmp = new PropertiesConfiguration();
+      tmp.copy(c);
       tmp.save(ps);
+      return buffer.toString("UTF-8");
     } catch (Exception e) {
       throw new MetricsConfigException(e);
     }
-    return buffer.toString();
   }
 }

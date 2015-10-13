@@ -34,7 +34,6 @@ import java.util.Random;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -45,10 +44,10 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
-import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoUnderConstruction;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockUnderConstructionFeature;
 import org.apache.hadoop.hdfs.server.datanode.BlockPoolSliceStorage;
-import org.apache.hadoop.hdfs.server.datanode.DataBlockScanner;
+import org.apache.hadoop.hdfs.server.datanode.BlockScanner;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.hdfs.server.datanode.DirectoryScanner;
 import org.apache.hadoop.hdfs.server.namenode.FSDirectory;
@@ -62,7 +61,7 @@ import org.apache.hadoop.http.HttpServer2;
 import org.apache.hadoop.ipc.ProtobufRpcEngine.Server;
 import org.apache.hadoop.metrics2.impl.MetricsSystemImpl;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.log4j.Level;
+import org.apache.hadoop.test.GenericTestUtils;
 import org.junit.Assert;
 
 /**
@@ -79,28 +78,24 @@ public class SnapshotTestHelper {
         "org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.FsDatasetAsyncDiskService",
     };
     for(String n : lognames) {
-      setLevel2OFF(LogFactory.getLog(n));
+      GenericTestUtils.disableLog(LogFactory.getLog(n));
     }
     
-    setLevel2OFF(LogFactory.getLog(UserGroupInformation.class));
-    setLevel2OFF(LogFactory.getLog(BlockManager.class));
-    setLevel2OFF(LogFactory.getLog(FSNamesystem.class));
-    setLevel2OFF(LogFactory.getLog(DirectoryScanner.class));
-    setLevel2OFF(LogFactory.getLog(MetricsSystemImpl.class));
+    GenericTestUtils.disableLog(LogFactory.getLog(UserGroupInformation.class));
+    GenericTestUtils.disableLog(LogFactory.getLog(BlockManager.class));
+    GenericTestUtils.disableLog(LogFactory.getLog(FSNamesystem.class));
+    GenericTestUtils.disableLog(LogFactory.getLog(DirectoryScanner.class));
+    GenericTestUtils.disableLog(LogFactory.getLog(MetricsSystemImpl.class));
     
-    setLevel2OFF(DataBlockScanner.LOG);
-    setLevel2OFF(HttpServer2.LOG);
-    setLevel2OFF(DataNode.LOG);
-    setLevel2OFF(BlockPoolSliceStorage.LOG);
-    setLevel2OFF(LeaseManager.LOG);
-    setLevel2OFF(NameNode.stateChangeLog);
-    setLevel2OFF(NameNode.blockStateChangeLog);
-    setLevel2OFF(DFSClient.LOG);
-    setLevel2OFF(Server.LOG);
-  }
-
-  static void setLevel2OFF(Object log) {
-    ((Log4JLogger)log).getLogger().setLevel(Level.OFF);
+    GenericTestUtils.disableLog(BlockScanner.LOG);
+    GenericTestUtils.disableLog(HttpServer2.LOG);
+    GenericTestUtils.disableLog(DataNode.LOG);
+    GenericTestUtils.disableLog(BlockPoolSliceStorage.LOG);
+    GenericTestUtils.disableLog(LeaseManager.LOG);
+    GenericTestUtils.disableLog(NameNode.stateChangeLog);
+    GenericTestUtils.disableLog(NameNode.blockStateChangeLog);
+    GenericTestUtils.disableLog(DFSClient.LOG);
+    GenericTestUtils.disableLog(Server.LOG);
   }
 
   private SnapshotTestHelper() {
@@ -180,10 +175,9 @@ public class SnapshotTestHelper {
    * localName (className@hashCode) parent permission group user
    * 
    * Specific information for different types of INode: 
-   * {@link INodeDirectory}:childrenSize 
-   * {@link INodeFile}: fileSize, block list. Check {@link BlockInfo#toString()} 
-   * and {@link BlockInfoUnderConstruction#toString()} for detailed information.
-   * {@link FileWithSnapshot}: next link
+   * {@link INodeDirectory}:childrenSize
+   * {@link INodeFile}: fileSize, block list. Check {@link BlockInfo#toString()}
+   * and {@link BlockUnderConstructionFeature#toString()} for detailed information.
    * </pre>
    * @see INode#dumpTreeRecursively()
    */
@@ -233,8 +227,8 @@ public class SnapshotTestHelper {
           line2 = line2.replaceAll("Quota\\[.*\\]", "Quota[]");
         }
         
-        // skip the specific fields of BlockInfoUnderConstruction when the node
-        // is an INodeFileSnapshot or an INodeFileUnderConstructionSnapshot
+        // skip the specific fields of BlockUnderConstructionFeature when the
+        // node is an INodeFileSnapshot or INodeFileUnderConstructionSnapshot
         if (line1.contains("(INodeFileSnapshot)")
             || line1.contains("(INodeFileUnderConstructionSnapshot)")) {
           line1 = line1.replaceAll(

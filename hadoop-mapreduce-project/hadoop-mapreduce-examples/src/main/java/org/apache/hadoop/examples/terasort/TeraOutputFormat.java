@@ -20,10 +20,13 @@ package org.apache.hadoop.examples.terasort;
 
 import java.io.IOException;
 
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapred.FileAlreadyExistsException;
 import org.apache.hadoop.mapred.InvalidJobConfException;
 import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.OutputCommitter;
@@ -37,21 +40,23 @@ import org.apache.hadoop.mapreduce.security.TokenCache;
  * An output format that writes the key and value appended together.
  */
 public class TeraOutputFormat extends FileOutputFormat<Text,Text> {
-  static final String FINAL_SYNC_ATTRIBUTE = "mapreduce.terasort.final.sync";
   private OutputCommitter committer = null;
 
   /**
    * Set the requirement for a final sync before the stream is closed.
    */
   static void setFinalSync(JobContext job, boolean newValue) {
-    job.getConfiguration().setBoolean(FINAL_SYNC_ATTRIBUTE, newValue);
+    job.getConfiguration().setBoolean(
+        TeraSortConfigKeys.FINAL_SYNC_ATTRIBUTE.key(), newValue);
   }
 
   /**
    * Does the user want a final sync at close?
    */
   public static boolean getFinalSync(JobContext job) {
-    return job.getConfiguration().getBoolean(FINAL_SYNC_ATTRIBUTE, false);
+    return job.getConfiguration().getBoolean(
+        TeraSortConfigKeys.FINAL_SYNC_ATTRIBUTE.key(),
+        TeraSortConfigKeys.DEFAULT_FINAL_SYNC_ATTRIBUTE);
   }
 
   static class TeraRecordWriter extends RecordWriter<Text,Text> {
@@ -87,9 +92,31 @@ public class TeraOutputFormat extends FileOutputFormat<Text,Text> {
       throw new InvalidJobConfException("Output directory not set in JobConf.");
     }
 
+    final Configuration jobConf = job.getConfiguration();
+
     // get delegation token for outDir's file system
     TokenCache.obtainTokensForNamenodes(job.getCredentials(),
-        new Path[] { outDir }, job.getConfiguration());
+        new Path[] { outDir }, jobConf);
+
+    final FileSystem fs = outDir.getFileSystem(jobConf);
+
+    if (fs.exists(outDir)) {
+      // existing output dir is considered empty iff its only content is the
+      // partition file.
+      //
+      final FileStatus[] outDirKids = fs.listStatus(outDir);
+      boolean empty = false;
+      if (outDirKids != null && outDirKids.length == 1) {
+        final FileStatus st = outDirKids[0];
+        final String fname = st.getPath().getName();
+        empty =
+          !st.isDirectory() && TeraInputFormat.PARTITION_FILENAME.equals(fname);
+      }
+      if (TeraSort.getUseSimplePartitioner(job) || !empty) {
+        throw new FileAlreadyExistsException("Output directory " + outDir
+            + " already exists");
+      }
+    }
   }
 
   public RecordWriter<Text,Text> getRecordWriter(TaskAttemptContext job

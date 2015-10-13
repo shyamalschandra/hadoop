@@ -23,14 +23,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
-import java.io.PrintWriter;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -62,10 +58,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeImpl;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueNotFoundException;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ResourceScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerNode;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.YarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacityScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.LeafQueue;
@@ -73,11 +69,10 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.ParentQu
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FSAppAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FSParentQueue;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairScheduler;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.FairSchedulerConfiguration;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair.policies.DominantResourceFairnessPolicy;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.fifo.FifoScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.security.DelegationTokenRenewer;
 import org.apache.hadoop.yarn.util.ControlledClock;
+import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.SystemClock;
 import org.apache.hadoop.yarn.util.resource.DominantResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
@@ -97,23 +92,24 @@ import com.google.common.base.Supplier;
 
 @SuppressWarnings({"rawtypes", "unchecked"})
 @RunWith(value = Parameterized.class)
-public class TestWorkPreservingRMRestart {
+public class TestWorkPreservingRMRestart extends ParameterizedSchedulerTestBase {
 
   private YarnConfiguration conf;
-  private Class<?> schedulerClass;
   MockRM rm1 = null;
   MockRM rm2 = null;
+
+  public TestWorkPreservingRMRestart(SchedulerType type) {
+    super(type);
+  }
 
   @Before
   public void setup() throws UnknownHostException {
     Logger rootLogger = LogManager.getRootLogger();
     rootLogger.setLevel(Level.DEBUG);
-    conf = new YarnConfiguration();
+    conf = getConf();
     UserGroupInformation.setConfiguration(conf);
     conf.set(YarnConfiguration.RECOVERY_ENABLED, "true");
     conf.set(YarnConfiguration.RM_STORE, MemoryRMStateStore.class.getName());
-    conf.setClass(YarnConfiguration.RM_SCHEDULER, schedulerClass,
-      ResourceScheduler.class);
     conf.setBoolean(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_ENABLED, true);
     conf.setLong(YarnConfiguration.RM_WORK_PRESERVING_RECOVERY_SCHEDULING_WAIT_MS, 0);
     DefaultMetricsSystem.setMiniClusterMode(true);
@@ -127,16 +123,6 @@ public class TestWorkPreservingRMRestart {
     if (rm2 != null) {
       rm2.stop();
     }
-  }
-
-  @Parameterized.Parameters
-  public static Collection<Object[]> getTestParameters() {
-    return Arrays.asList(new Object[][] { { CapacityScheduler.class },
-        { FifoScheduler.class }, {FairScheduler.class } });
-  }
-
-  public TestWorkPreservingRMRestart(Class<?> schedulerClass) {
-    this.schedulerClass = schedulerClass;
   }
 
   // Test common scheduler state including SchedulerAttempt, SchedulerNode,
@@ -159,9 +145,6 @@ public class TestWorkPreservingRMRestart {
     MemoryRMStateStore memStore = new MemoryRMStateStore();
     memStore.init(conf);
     rm1 = new MockRM(conf, memStore);
-    if (schedulerClass.equals(FairScheduler.class)) {
-      initFairScheduler(rm1);
-    }
     rm1.start();
     MockNM nm1 =
         new MockNM("127.0.0.1:1234", 8192, rm1.getResourceTrackerService());
@@ -174,9 +157,6 @@ public class TestWorkPreservingRMRestart {
 
     // Re-start RM
     rm2 = new MockRM(conf, memStore);
-    if (schedulerClass.equals(FairScheduler.class)) {
-      initFairScheduler(rm2);
-    }
     rm2.start();
     nm1.setResourceTrackerService(rm2.getResourceTrackerService());
     // recover app
@@ -214,6 +194,14 @@ public class TestWorkPreservingRMRestart {
     AbstractYarnScheduler scheduler =
         (AbstractYarnScheduler) rm2.getResourceScheduler();
     SchedulerNode schedulerNode1 = scheduler.getSchedulerNode(nm1.getNodeId());
+    assertTrue(
+        "SchedulerNode#toString is not in expected format",
+        schedulerNode1
+        .toString().contains(schedulerNode1.getAvailableResource().toString()));
+    assertTrue(
+        "SchedulerNode#toString is not in expected format",
+        schedulerNode1
+        .toString().contains(schedulerNode1.getUsedResource().toString()));
 
     // ********* check scheduler node state.*******
     // 2 running containers.
@@ -241,11 +229,9 @@ public class TestWorkPreservingRMRestart {
     SchedulerApplication schedulerApp =
         schedulerApps.get(recoveredApp1.getApplicationId());
 
-    if (schedulerClass.equals(CapacityScheduler.class)) {
+    if (getSchedulerType() == SchedulerType.CAPACITY) {
       checkCSQueue(rm2, schedulerApp, nmResource, nmResource, usedResources, 2);
-    } else if (schedulerClass.equals(FifoScheduler.class)) {
-      checkFifoQueue(rm2, schedulerApp, usedResources, availableResources);
-    } else if (schedulerClass.equals(FairScheduler.class)) {
+    } else {
       checkFSQueue(rm2, schedulerApp, usedResources, availableResources);
     }
 
@@ -313,26 +299,7 @@ public class TestWorkPreservingRMRestart {
       1e-8);
     // assert user consumed resources.
     assertEquals(usedResource, leafQueue.getUser(app.getUser())
-      .getTotalConsumedResources());
-  }
-
-  private void checkFifoQueue(ResourceManager rm,
-      SchedulerApplication  schedulerApp, Resource usedResources,
-      Resource availableResources) throws Exception {
-    FifoScheduler scheduler = (FifoScheduler) rm.getResourceScheduler();
-    // ************ check cluster used Resources ********
-    assertEquals(usedResources, scheduler.getUsedResource());
-
-    // ************ check app headroom ****************
-    SchedulerApplicationAttempt schedulerAttempt =
-        schedulerApp.getCurrentAppAttempt();
-    assertEquals(availableResources, schedulerAttempt.getHeadroom());
-
-    // ************ check queue metrics ****************
-    QueueMetrics queueMetrics = scheduler.getRootQueueMetrics();
-    assertMetrics(queueMetrics, 1, 0, 1, 0, 2, availableResources.getMemory(),
-        availableResources.getVirtualCores(), usedResources.getMemory(),
-        usedResources.getVirtualCores());
+      .getUsed());
   }
 
   private void checkFSQueue(ResourceManager rm,
@@ -369,29 +336,6 @@ public class TestWorkPreservingRMRestart {
     assertMetrics(queueMetrics, 1, 0, 1, 0, 2, availableResources.getMemory(),
         availableResources.getVirtualCores(), usedResources.getMemory(),
         usedResources.getVirtualCores());
-  }
-
-  private void initFairScheduler(ResourceManager rm) throws IOException {
-    FairScheduler scheduler = (FairScheduler) rm.getResourceScheduler();
-    String testDir =
-        new File(
-            System.getProperty("test.build.data", "/tmp")).getAbsolutePath();
-    String allocFile = new File(testDir, "test-queues").getAbsolutePath();
-    conf.set(FairSchedulerConfiguration.ALLOCATION_FILE, allocFile);
-
-    PrintWriter out = new PrintWriter(new FileWriter(allocFile));
-    out.println("<?xml version=\"1.0\"?>");
-    out.println("<allocations>");
-    out.println("<defaultQueueSchedulingPolicy>fair</defaultQueueSchedulingPolicy>");
-    out.println("<queue name=\"root\">");
-    out.println("  <schedulingPolicy>drf</schedulingPolicy>");
-    out.println("  <weight>1.0</weight>");
-    out.println("  <fairSharePreemptionTimeout>100</fairSharePreemptionTimeout>");
-    out.println("  <minSharePreemptionTimeout>120</minSharePreemptionTimeout>");
-    out.println("  <fairSharePreemptionThreshold>.5</fairSharePreemptionThreshold>");
-    out.println("</queue>");
-    out.println("</allocations>");
-    out.close();
   }
 
   // create 3 container reports for AM
@@ -460,7 +404,7 @@ public class TestWorkPreservingRMRestart {
   // 10. Assert each user's consumption inside the queue.
   @Test (timeout = 30000)
   public void testCapacitySchedulerRecovery() throws Exception {
-    if (!schedulerClass.equals(CapacityScheduler.class)) {
+    if (getSchedulerType() != SchedulerType.CAPACITY) {
       return;
     }
     conf.setBoolean(CapacitySchedulerConfiguration.ENABLE_USER_METRICS, true);
@@ -491,6 +435,8 @@ public class TestWorkPreservingRMRestart {
     rm1.clearQueueMetrics(app1_1);
     rm1.clearQueueMetrics(app1_2);
     rm1.clearQueueMetrics(app2);
+
+    csConf.set("yarn.scheduler.capacity.root.Default.QueueB.state", "STOPPED");
 
     // Re-start RM
     rm2 = new MockRM(csConf, memStore);
@@ -577,7 +523,7 @@ public class TestWorkPreservingRMRestart {
   //3. Verify that the expected exception was thrown
   @Test (timeout = 30000, expected = QueueNotFoundException.class)
   public void testCapacitySchedulerQueueRemovedRecovery() throws Exception {
-    if (!schedulerClass.equals(CapacityScheduler.class)) {
+    if (getSchedulerType() != SchedulerType.CAPACITY) {
       throw new QueueNotFoundException("Dummy");
     }
     conf.setBoolean(CapacitySchedulerConfiguration.ENABLE_USER_METRICS, true);
@@ -664,8 +610,7 @@ public class TestWorkPreservingRMRestart {
     // Wait for RM to settle down on recovering containers;
     Thread.sleep(3000);
 
-    AbstractYarnScheduler scheduler =
-        (AbstractYarnScheduler) rm2.getResourceScheduler();
+    YarnScheduler scheduler = rm2.getResourceScheduler();
     // Previous AM failed, The failed AM should once again release the
     // just-recovered containers.
     assertNull(scheduler.getRMContainer(runningContainer.getContainerId()));
@@ -717,8 +662,7 @@ public class TestWorkPreservingRMRestart {
     // Wait for RM to settle down on recovering containers;
     Thread.sleep(3000);
 
-    AbstractYarnScheduler scheduler =
-        (AbstractYarnScheduler) rm2.getResourceScheduler();
+    YarnScheduler scheduler = rm2.getResourceScheduler();
 
     // scheduler should not recover containers for finished apps.
     assertNull(scheduler.getRMContainer(runningContainer.getContainerId()));
@@ -772,9 +716,8 @@ public class TestWorkPreservingRMRestart {
     MockAM am1_1 = MockRM.launchAndRegisterAM(app1_1, rm1, nm1);
     
     RMAppAttempt attempt0 = app1_1.getCurrentAppAttempt();
-    AbstractYarnScheduler scheduler =
-        ((AbstractYarnScheduler) rm1.getResourceScheduler());
-    
+    YarnScheduler scheduler = rm1.getResourceScheduler();
+
     Assert.assertTrue(scheduler.getRMContainer(
         attempt0.getMasterContainer().getId()).isAMContainer());
 
@@ -790,7 +733,7 @@ public class TestWorkPreservingRMRestart {
     // Wait for RM to settle down on recovering containers;
     waitForNumContainersToRecover(2, rm2, am1_1.getApplicationAttemptId());
 
-    scheduler = ((AbstractYarnScheduler) rm2.getResourceScheduler());
+    scheduler = rm2.getResourceScheduler();
     Assert.assertTrue(scheduler.getRMContainer(
         attempt0.getMasterContainer().getId()).isAMContainer());
   }
@@ -818,7 +761,7 @@ public class TestWorkPreservingRMRestart {
       am0.getApplicationAttemptId()));
 
     // getTransferredContainers should not throw NPE.
-    ((AbstractYarnScheduler) rm2.getResourceScheduler())
+    rm2.getResourceScheduler()
       .getTransferredContainers(am0.getApplicationAttemptId());
 
     List<NMContainerStatus> containers = createNMContainerStatusForApp(am0);
@@ -829,7 +772,7 @@ public class TestWorkPreservingRMRestart {
   // Test if RM on recovery receives the container release request from AM
   // before it receives the container status reported by NM for recovery. this
   // container should not be recovered.
-  @Test (timeout = 30000)
+  @Test (timeout = 50000)
   public void testReleasedContainerNotRecovered() throws Exception {
     MemoryRMStateStore memStore = new MemoryRMStateStore();
     memStore.init(conf);
@@ -1060,4 +1003,93 @@ public class TestWorkPreservingRMRestart {
     rm2.waitForState(am1.getApplicationAttemptId(), RMAppAttemptState.FAILED);
     rm2.waitForState(app1.getApplicationId(), RMAppState.FAILED);
   }
+
+  /**
+   * Test validateAndCreateResourceRequest fails on recovery, app should ignore
+   * this Exception and continue
+   */
+  @Test (timeout = 30000)
+  public void testAppFailToValidateResourceRequestOnRecovery() throws Exception{
+    MemoryRMStateStore memStore = new MemoryRMStateStore();
+    memStore.init(conf);
+    rm1 = new MockRM(conf, memStore);
+    rm1.start();
+    MockNM nm1 =
+        new MockNM("127.0.0.1:1234", 8192, rm1.getResourceTrackerService());
+    nm1.registerNode();
+    RMApp app1 = rm1.submitApp(200);
+    MockAM am1 = MockRM.launchAndRegisterAM(app1, rm1, nm1);
+
+    // Change the config so that validateAndCreateResourceRequest throws
+    // exception on recovery
+    conf.setInt(YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB, 50);
+    conf.setInt(YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_MB, 100);
+
+    rm2 = new MockRM(conf, memStore);
+    nm1.setResourceTrackerService(rm2.getResourceTrackerService());
+    rm2.start();
+  }
+
+  @Test(timeout = 20000)
+  public void testContainerCompleteMsgNotLostAfterAMFailedAndRMRestart() throws Exception {
+    MemoryRMStateStore memStore = new MemoryRMStateStore();
+    memStore.init(conf);
+    rm1 = new MockRM(conf, memStore);
+    rm1.start();
+
+    MockNM nm1 =
+        new MockNM("127.0.0.1:1234", 8192, rm1.getResourceTrackerService());
+    nm1.registerNode();
+
+    // submit app with keepContainersAcrossApplicationAttempts true
+    Resource resource = Records.newRecord(Resource.class);
+    resource.setMemory(200);
+    RMApp app0 = rm1.submitApp(resource, "", UserGroupInformation
+        .getCurrentUser().getShortUserName(), null, false, null,
+        YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS, null, null, true, true,
+        false, null, 0, null, true, null);
+    MockAM am0 = MockRM.launchAndRegisterAM(app0, rm1, nm1);
+
+    am0.allocate("127.0.0.1", 1000, 2, new ArrayList<ContainerId>());
+    nm1.nodeHeartbeat(true);
+    List<Container> conts = am0.allocate(new ArrayList<ResourceRequest>(),
+        new ArrayList<ContainerId>()).getAllocatedContainers();
+    while (conts.size() == 0) {
+      nm1.nodeHeartbeat(true);
+      conts.addAll(am0.allocate(new ArrayList<ResourceRequest>(),
+          new ArrayList<ContainerId>()).getAllocatedContainers());
+      Thread.sleep(500);
+    }
+
+    // am failed,and relaunch it
+    nm1.nodeHeartbeat(am0.getApplicationAttemptId(), 1, ContainerState.COMPLETE);
+    rm1.waitForState(app0.getApplicationId(), RMAppState.ACCEPTED);
+    MockAM am1 = MockRM.launchAndRegisterAM(app0, rm1, nm1);
+
+    // rm failover
+    rm2 = new MockRM(conf, memStore);
+    rm2.start();
+    nm1.setResourceTrackerService(rm2.getResourceTrackerService());
+
+    // container launched by first am completed
+    NMContainerStatus amContainer =
+        TestRMRestart.createNMContainerStatus(am0.getApplicationAttemptId(), 1,
+          ContainerState.RUNNING);
+    NMContainerStatus completedContainer=
+        TestRMRestart.createNMContainerStatus(am0.getApplicationAttemptId(), 2,
+          ContainerState.COMPLETE);
+    NMContainerStatus runningContainer =
+        TestRMRestart.createNMContainerStatus(am0.getApplicationAttemptId(), 3,
+          ContainerState.RUNNING);
+    nm1.registerNode(Arrays.asList(amContainer, runningContainer,
+        completedContainer), null);
+    Thread.sleep(200);
+
+    // check whether current am could get containerCompleteMsg
+    RMApp recoveredApp0 =
+        rm2.getRMContext().getRMApps().get(app0.getApplicationId());
+    RMAppAttempt loadedAttempt1 = recoveredApp0.getCurrentAppAttempt();
+    assertEquals(1,loadedAttempt1.getJustFinishedContainers().size());
+  }
+
 }

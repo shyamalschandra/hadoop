@@ -18,10 +18,11 @@
 package org.apache.hadoop.hdfs.server.namenode.snapshot;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 
-
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.hdfs.AppendTestUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -29,8 +30,11 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import static org.hamcrest.CoreMatchers.is;
-import static org.junit.Assert.*;
-
+import static org.hamcrest.CoreMatchers.not;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -103,17 +107,41 @@ public class TestSnapshotFileLength {
     Path file1snap1
         = SnapshotTestHelper.getSnapshotPath(sub, snapshot1, file1Name);
 
+    final FileChecksum snapChksum1 = hdfs.getFileChecksum(file1snap1);
+    assertThat("file and snapshot file checksums are not equal",
+        hdfs.getFileChecksum(file1), is(snapChksum1));
+
     // Append to the file.
     FSDataOutputStream out = hdfs.append(file1);
+    // Nothing has been appended yet. All checksums should still be equal.
+    // HDFS-8150:Fetching checksum for file under construction should fail
+    try {
+      hdfs.getFileChecksum(file1);
+      fail("getFileChecksum should fail for files "
+          + "with blocks under construction");
+    } catch (IOException ie) {
+      assertTrue(ie.getMessage().contains(
+          "Fail to get checksum, since file " + file1
+              + " is under construction."));
+    }
+    assertThat("snapshot checksum (post-open for append) has changed",
+        hdfs.getFileChecksum(file1snap1), is(snapChksum1));
     try {
       AppendTestUtil.write(out, 0, toAppend);
       // Test reading from snapshot of file that is open for append
       byte[] dataFromSnapshot = DFSTestUtil.readFileBuffer(hdfs, file1snap1);
       assertThat("Wrong data size in snapshot.",
           dataFromSnapshot.length, is(origLen));
+      // Verify that checksum didn't change
+      assertThat("snapshot checksum (post-append) has changed",
+          hdfs.getFileChecksum(file1snap1), is(snapChksum1));
     } finally {
       out.close();
     }
+    assertThat("file and snapshot file checksums (post-close) are equal",
+        hdfs.getFileChecksum(file1), not(snapChksum1));
+    assertThat("snapshot file checksum (post-close) has changed",
+        hdfs.getFileChecksum(file1snap1), is(snapChksum1));
 
     // Make sure we can read the entire file via its non-snapshot path.
     fileStatus = hdfs.getFileStatus(file1);

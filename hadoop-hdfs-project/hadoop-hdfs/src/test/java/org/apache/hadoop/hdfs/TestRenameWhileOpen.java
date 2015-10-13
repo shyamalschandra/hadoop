@@ -22,25 +22,18 @@ import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLog;
-import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
-import org.apache.hadoop.hdfs.server.namenode.LeaseManager;
-import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.log4j.Level;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 public class TestRenameWhileOpen {
   {
-    ((Log4JLogger)NameNode.stateChangeLog).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LeaseManager.LOG).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger)LogFactory.getLog(FSNamesystem.class)).getLogger().setLevel(Level.ALL);
+    DFSTestUtil.setNameNodeLogLevel(Level.ALL);
   }
 
   //TODO: un-comment checkFullFile once the lease recovery is done
@@ -77,7 +70,7 @@ public class TestRenameWhileOpen {
       FSEditLog spyLog =
           spy(cluster.getNameNode().getFSImage().getEditLog());
       doNothing().when(spyLog).endCurrentLogSegment(Mockito.anyBoolean());
-      cluster.getNameNode().getFSImage().setEditLogForTesting(spyLog);
+      DFSTestUtil.setEditLogForTesting(cluster.getNamesystem(), spyLog);
 
       final int nnport = cluster.getNameNodePort();
 

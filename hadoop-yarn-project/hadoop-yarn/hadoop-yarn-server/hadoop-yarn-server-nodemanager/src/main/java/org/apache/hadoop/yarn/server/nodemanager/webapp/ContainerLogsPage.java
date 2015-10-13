@@ -28,6 +28,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -58,9 +59,6 @@ public class ContainerLogsPage extends NMView {
       if (redirectUrl.equals("false")) {
         set(TITLE, join("Failed redirect for ", $(CONTAINER_ID)));
         //Error getting redirect url. Fall through.
-      } else {
-        set(TITLE, join("Redirecting to log server for ", $(CONTAINER_ID)));
-        html.meta_http("refresh", "1; url=" + redirectUrl);
       }
     }
     
@@ -151,7 +149,8 @@ public class ContainerLogsPage extends NMView {
           }
           
           IOUtils.skipFully(logByteStream, start);
-          InputStreamReader reader = new InputStreamReader(logByteStream);
+          InputStreamReader reader =
+              new InputStreamReader(logByteStream, Charset.forName("UTF-8"));
           int bufferSize = 65536;
           char[] cbuf = new char[bufferSize];
 

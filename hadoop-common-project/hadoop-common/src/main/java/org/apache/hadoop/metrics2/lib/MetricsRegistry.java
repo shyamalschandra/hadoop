@@ -188,16 +188,21 @@ public class MetricsRegistry {
    * @param valueName of the metric (e.g., "Time" or "Latency")
    * @param interval rollover interval of estimator in seconds
    * @return a new quantile estimator object
+   * @throws MetricsException if interval is not a positive integer
    */
   public synchronized MutableQuantiles newQuantiles(String name, String desc,
       String sampleName, String valueName, int interval) {
     checkMetricName(name);
-    MutableQuantiles ret = 
+    if (interval <= 0) {
+      throw new MetricsException("Interval should be positive.  Value passed" +
+          " is: " + interval);
+    }
+    MutableQuantiles ret =
         new MutableQuantiles(name, desc, sampleName, valueName, interval);
     metricsMap.put(name, ret);
     return ret;
   }
-  
+
   /**
    * Create a mutable metric with stats
    * @param name  of the metric
@@ -363,6 +368,20 @@ public class MetricsRegistry {
   }
 
   private void checkMetricName(String name) {
+    // Check for invalid characters in metric name
+    boolean foundWhitespace = false;
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if (Character.isWhitespace(c)) {
+        foundWhitespace = true;
+        break;
+      }
+    }
+    if (foundWhitespace) {
+      throw new MetricsException("Metric name '"+ name +
+          "' contains illegal whitespace character");
+    }
+    // Check if name has already been registered
     if (metricsMap.containsKey(name)) {
       throw new MetricsException("Metric name "+ name +" already exists!");
     }

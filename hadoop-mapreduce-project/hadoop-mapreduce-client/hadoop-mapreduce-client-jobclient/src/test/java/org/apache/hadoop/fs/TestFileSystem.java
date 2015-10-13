@@ -40,7 +40,7 @@ import org.apache.commons.logging.Log;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.server.namenode.NameNode;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
 import org.apache.hadoop.fs.shell.CommandFormat;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.SequenceFile;
@@ -49,6 +49,7 @@ import org.apache.hadoop.io.SequenceFile.CompressionType;
 import org.apache.hadoop.mapred.*;
 import org.apache.hadoop.mapred.lib.LongSumReducer;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.StringUtils;
 
 public class TestFileSystem extends TestCase {
   private static final Log LOG = FileSystem.LOG;
@@ -509,10 +510,10 @@ public class TestFileSystem extends TestCase {
     
     {
       try {
-        runTestCache(NameNode.DEFAULT_PORT);
+        runTestCache(HdfsClientConfigKeys.DFS_NAMENODE_RPC_PORT_DEFAULT);
       } catch(java.net.BindException be) {
-        LOG.warn("Cannot test NameNode.DEFAULT_PORT (="
-            + NameNode.DEFAULT_PORT + ")", be);
+        LOG.warn("Cannot test HdfsClientConfigKeys.DFS_NAMENODE_RPC_PORT_DEFAULT (="
+            + HdfsClientConfigKeys.DFS_NAMENODE_RPC_PORT_DEFAULT + ")", be);
       }
 
       runTestCache(0);
@@ -536,11 +537,11 @@ public class TestFileSystem extends TestCase {
         }
       }
       
-      if (port == NameNode.DEFAULT_PORT) {
+      if (port == HdfsClientConfigKeys.DFS_NAMENODE_RPC_PORT_DEFAULT) {
         //test explicit default port
         URI uri2 = new URI(uri.getScheme(), uri.getUserInfo(),
-            uri.getHost(), NameNode.DEFAULT_PORT, uri.getPath(),
-            uri.getQuery(), uri.getFragment());  
+            uri.getHost(), HdfsClientConfigKeys.DFS_NAMENODE_RPC_PORT_DEFAULT,
+            uri.getPath(), uri.getQuery(), uri.getFragment());
         LOG.info("uri2=" + uri2);
         FileSystem fs = FileSystem.get(uri2, conf);
         checkPath(cluster, fs);
@@ -556,7 +557,8 @@ public class TestFileSystem extends TestCase {
   static void checkPath(MiniDFSCluster cluster, FileSystem fileSys) throws IOException {
     InetSocketAddress add = cluster.getNameNode().getNameNodeAddress();
     // Test upper/lower case
-    fileSys.checkPath(new Path("hdfs://" + add.getHostName().toUpperCase() + ":" + add.getPort()));
+    fileSys.checkPath(new Path("hdfs://"
+        + StringUtils.toUpperCase(add.getHostName()) + ":" + add.getPort()));
   }
 
   public void testFsClose() throws Exception {

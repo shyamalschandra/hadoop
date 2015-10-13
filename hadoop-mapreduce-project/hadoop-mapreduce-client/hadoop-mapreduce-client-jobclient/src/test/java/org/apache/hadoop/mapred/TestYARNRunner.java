@@ -201,6 +201,32 @@ public class TestYARNRunner extends TestCase {
     verify(clientDelegate).killJob(jobId);
   }
 
+  @Test(timeout=60000)
+  public void testJobKillTimeout() throws Exception {
+    long timeToWaitBeforeHardKill =
+        10000 + MRJobConfig.DEFAULT_MR_AM_HARD_KILL_TIMEOUT_MS;
+    conf.setLong(MRJobConfig.MR_AM_HARD_KILL_TIMEOUT_MS,
+        timeToWaitBeforeHardKill);
+    clientDelegate = mock(ClientServiceDelegate.class);
+    doAnswer(
+        new Answer<ClientServiceDelegate>() {
+          @Override
+          public ClientServiceDelegate answer(InvocationOnMock invocation)
+              throws Throwable {
+            return clientDelegate;
+          }
+        }
+      ).when(clientCache).getClient(any(JobID.class));
+    when(clientDelegate.getJobStatus(any(JobID.class))).thenReturn(new
+        org.apache.hadoop.mapreduce.JobStatus(jobId, 0f, 0f, 0f, 0f,
+            State.RUNNING, JobPriority.HIGH, "tmp", "tmp", "tmp", "tmp"));
+    long startTimeMillis = System.currentTimeMillis();
+    yarnRunner.killJob(jobId);
+    assertTrue("killJob should have waited at least " + timeToWaitBeforeHardKill
+        + " ms.", System.currentTimeMillis() - startTimeMillis
+                  >= timeToWaitBeforeHardKill);
+  }
+
   @Test(timeout=20000)
   public void testJobSubmissionFailure() throws Exception {
     when(resourceMgrDelegate.submitApplication(any(ApplicationSubmissionContext.class))).
@@ -435,7 +461,8 @@ public class TestYARNRunner extends TestCase {
     int adminPos = -1;
     int userIndex = 0;
     int userPos = -1;
-    
+    int tmpDirPos = -1;
+
     for(String command : commands) {
       if(command != null) {
         assertFalse("Profiler should be disabled by default",
@@ -447,11 +474,16 @@ public class TestYARNRunner extends TestCase {
         userPos = command.indexOf("-Xmx1024m");
         if(userPos >= 0)
           userIndex = index;
+
+        tmpDirPos = command.indexOf("-Djava.io.tmpdir=");
       }
       
       index++;
     }
-    
+
+    // Check java.io.tmpdir opts are set in the commands
+    assertTrue("java.io.tmpdir is not set for AM", tmpDirPos > 0);
+
     // Check both admin java opts and user java opts are in the commands
     assertTrue("AM admin command opts not in the commands.", adminPos > 0);
     assertTrue("AM user command opts not in the commands.", userPos > 0);
@@ -518,6 +550,22 @@ public class TestYARNRunner extends TestCase {
       }
     }
     throw new IllegalStateException("Profiler opts not found!");
+  }
+
+  @Test
+  public void testNodeLabelExp() throws Exception {
+    JobConf jobConf = new JobConf();
+
+    jobConf.set(MRJobConfig.JOB_NODE_LABEL_EXP, "GPU");
+    jobConf.set(MRJobConfig.AM_NODE_LABEL_EXP, "highMem");
+
+    YARNRunner yarnRunner = new YARNRunner(jobConf);
+    ApplicationSubmissionContext appSubCtx =
+        buildSubmitContext(yarnRunner, jobConf);
+
+    assertEquals(appSubCtx.getNodeLabelExpression(), "GPU");
+    assertEquals(appSubCtx.getAMContainerResourceRequest()
+        .getNodeLabelExpression(), "highMem");
   }
 
   @Test

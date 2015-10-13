@@ -51,7 +51,7 @@ public class MockNM {
   private final int memory;
   private final int vCores;
   private ResourceTrackerService resourceTracker;
-  private final int httpPort = 2;
+  private int httpPort = 2;
   private MasterKey currentContainerTokenMasterKey;
   private MasterKey currentNMTokenMasterKey;
   private String version;
@@ -87,6 +87,10 @@ public class MockNM {
     return httpPort;
   }
   
+  public void setHttpPort(int port) {
+    httpPort = port;
+  }
+
   public void setResourceTrackerService(ResourceTrackerService resourceTracker) {
     this.resourceTracker = resourceTracker;
   }
@@ -139,7 +143,7 @@ public class MockNM {
         new HashMap<ApplicationId, List<ContainerStatus>>(1);
     ContainerStatus containerStatus = BuilderUtils.newContainerStatus(
         BuilderUtils.newContainerId(attemptId, containerId), containerState,
-        "Success", 0);
+        "Success", 0, BuilderUtils.newResource(memory, vCores));
     ArrayList<ContainerStatus> containerStatusList =
         new ArrayList<ContainerStatus>(1);
     containerStatusList.add(containerStatus);

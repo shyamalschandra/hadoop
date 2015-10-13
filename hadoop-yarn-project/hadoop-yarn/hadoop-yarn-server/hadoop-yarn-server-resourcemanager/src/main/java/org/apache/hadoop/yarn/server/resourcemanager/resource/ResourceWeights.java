@@ -20,6 +20,7 @@ package org.apache.hadoop.yarn.server.resourcemanager.resource;
 
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
+import org.apache.hadoop.util.StringUtils;
 
 @Private
 @Evolving
@@ -61,8 +62,8 @@ public class ResourceWeights {
         sb.append(", ");
       }
       ResourceType resourceType = ResourceType.values()[i];
-      sb.append(resourceType.name().toLowerCase());
-      sb.append(String.format(" weight=%.1f", getWeight(resourceType)));
+      sb.append(StringUtils.toLowerCase(resourceType.name()));
+      sb.append(StringUtils.format(" weight=%.1f", getWeight(resourceType)));
     }
     sb.append(">");
     return sb.toString();

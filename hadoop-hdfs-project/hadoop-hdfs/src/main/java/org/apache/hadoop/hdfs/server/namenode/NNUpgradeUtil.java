@@ -19,16 +19,24 @@ package org.apache.hadoop.hdfs.server.namenode;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.FileVisitOption;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.Collections;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 
 import com.google.common.base.Preconditions;
 
-abstract class NNUpgradeUtil {
+public abstract class NNUpgradeUtil {
   
   private static final Log LOG = LogFactory.getLog(NNUpgradeUtil.class);
   
@@ -99,15 +107,52 @@ abstract class NNUpgradeUtil {
    * a call to any JM's or local storage dir's doPreUpgrade method fails, then
    * doUpgrade will not be called for any JM. The existing current dir is
    * renamed to previous.tmp, and then a new, empty current dir is created.
-   * 
+   *
+   * @param conf configuration for creating {@link EditLogFileOutputStream}
    * @param sd the storage directory to perform the pre-upgrade procedure.
    * @throws IOException in the event of error
    */
-  static void doPreUpgrade(StorageDirectory sd) throws IOException {
+  static void doPreUpgrade(Configuration conf, StorageDirectory sd)
+      throws IOException {
     LOG.info("Starting upgrade of storage directory " + sd.getRoot());
+
+    // rename current to tmp
+    renameCurToTmp(sd);
+
+    final Path curDir = sd.getCurrentDir().toPath();
+    final Path tmpDir = sd.getPreviousTmp().toPath();
+
+    Files.walkFileTree(tmpDir,
+      /* do not follow links */ Collections.<FileVisitOption>emptySet(),
+        1, new SimpleFileVisitor<Path>() {
+
+          @Override
+          public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+              throws IOException {
+
+            String name = file.getFileName().toString();
+
+            if (Files.isRegularFile(file)
+                && name.startsWith(NNStorage.NameNodeFile.EDITS.getName())) {
+
+              Path newFile = curDir.resolve(name);
+              Files.createLink(newFile, file);
+            }
+
+            return super.visitFile(file, attrs);
+          }
+        }
+    );
+  }
+
+  /**
+   * Rename the existing current dir to previous.tmp, and create a new empty
+   * current dir.
+   */
+  public static void renameCurToTmp(StorageDirectory sd) throws IOException {
     File curDir = sd.getCurrentDir();
     File prevDir = sd.getPreviousDir();
-    File tmpDir = sd.getPreviousTmp();
+    final File tmpDir = sd.getPreviousTmp();
 
     Preconditions.checkState(curDir.exists(),
         "Current directory must exist for preupgrade.");
@@ -119,7 +164,7 @@ abstract class NNUpgradeUtil {
 
     // rename current to tmp
     NNStorage.rename(curDir, tmpDir);
-    
+
     if (!curDir.mkdir()) {
       throw new IOException("Cannot create directory " + curDir);
     }
@@ -134,14 +179,14 @@ abstract class NNUpgradeUtil {
    * @param storage info about the new upgraded versions.
    * @throws IOException in the event of error
    */
-  static void doUpgrade(StorageDirectory sd, Storage storage) throws
-      IOException {
+  public static void doUpgrade(StorageDirectory sd, Storage storage)
+      throws IOException {
     LOG.info("Performing upgrade of storage directory " + sd.getRoot());
     try {
       // Write the version file, since saveFsImage only makes the
       // fsimage_<txid>, and the directory is otherwise empty.
       storage.writeProperties(sd);
-      
+
       File prevDir = sd.getPreviousDir();
       File tmpDir = sd.getPreviousTmp();
       Preconditions.checkState(!prevDir.exists(),

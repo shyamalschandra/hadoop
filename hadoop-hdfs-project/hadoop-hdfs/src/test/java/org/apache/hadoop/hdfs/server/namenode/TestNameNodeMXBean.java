@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.namenode;
 
 import com.google.common.util.concurrent.Uninterruptibles;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -25,10 +26,14 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeDescriptor;
+import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeManager;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
+import org.apache.hadoop.hdfs.server.namenode.top.TopConf;
 import org.apache.hadoop.io.nativeio.NativeIO;
 import org.apache.hadoop.io.nativeio.NativeIO.POSIX.NoMlockCacheManipulator;
 import org.apache.hadoop.util.VersionInfo;
+import org.codehaus.jackson.map.ObjectMapper;
 import org.junit.Test;
 import org.mortbay.util.ajax.JSON;
 
@@ -38,10 +43,13 @@ import java.io.File;
 import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -67,8 +75,17 @@ public class TestNameNodeMXBean {
     MiniDFSCluster cluster = null;
 
     try {
-      cluster = new MiniDFSCluster.Builder(conf).build();
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(2).build();
       cluster.waitActive();
+
+      // Set upgrade domain on the first DN.
+      String upgradeDomain = "abcd";
+      DatanodeManager dm = cluster.getNameNode().getNamesystem().
+          getBlockManager().getDatanodeManager();
+      DatanodeDescriptor dd = dm.getDatanode(
+          cluster.getDataNodes().get(0).getDatanodeId());
+      dd.setUpgradeDomain(upgradeDomain);
+      String dnXferAddrWithUpgradeDomainSet = dd.getXferAddr();
 
       FSNamesystem fsn = cluster.getNameNode().namesystem;
 
@@ -111,7 +128,7 @@ public class TestNameNodeMXBean {
           "LiveNodes"));
       Map<String, Map<String, Object>> liveNodes =
           (Map<String, Map<String, Object>>) JSON.parse(alivenodeinfo);
-      assertTrue(liveNodes.size() > 0);
+      assertTrue(liveNodes.size() == 2);
       for (Map<String, Object> liveNode : liveNodes.values()) {
         assertTrue(liveNode.containsKey("nonDfsUsedSpace"));
         assertTrue(((Long)liveNode.get("nonDfsUsedSpace")) > 0);
@@ -119,6 +136,15 @@ public class TestNameNodeMXBean {
         assertTrue(((Long)liveNode.get("capacity")) > 0);
         assertTrue(liveNode.containsKey("numBlocks"));
         assertTrue(((Long)liveNode.get("numBlocks")) == 0);
+        // a. By default the upgrade domain isn't defined on any DN.
+        // b. If the upgrade domain is set on a DN, JMX should have the same
+        // value.
+        String xferAddr = (String)liveNode.get("xferaddr");
+        if (!xferAddr.equals(dnXferAddrWithUpgradeDomainSet)) {
+          assertTrue(!liveNode.containsKey("upgradeDomain"));
+        } else {
+          assertTrue(liveNode.get("upgradeDomain").equals(upgradeDomain));
+        }
       }
       assertEquals(fsn.getLiveNodes(), alivenodeinfo);
       // get attribute deadnodeinfo
@@ -138,9 +164,6 @@ public class TestNameNodeMXBean {
           "JournalTransactionInfo");
       assertEquals("Bad value for NameTxnIds", fsn.getJournalTransactionInfo(),
           journalTxnInfo);
-      // get attribute "NNStarted"
-      String nnStarted = (String) mbs.getAttribute(mxbeanName, "NNStarted");
-      assertEquals("Bad value for NNStarted", fsn.getNNStarted(), nnStarted);
       // get attribute "CompileInfo"
       String compileInfo = (String) mbs.getAttribute(mxbeanName, "CompileInfo");
       assertEquals("Bad value for CompileInfo", fsn.getCompileInfo(), compileInfo);
@@ -167,7 +190,7 @@ public class TestNameNodeMXBean {
       // This will cause the first dir to fail.
       File failedNameDir = new File(nameDirUris.iterator().next());
       assertEquals(0, FileUtil.chmod(
-        new File(failedNameDir, "current").getAbsolutePath(), "000"));
+          new File(failedNameDir, "current").getAbsolutePath(), "000"));
       cluster.getNameNodeRpc().rollEditLog();
       
       nameDirStatuses = (String) (mbs.getAttribute(mxbeanName,
@@ -188,6 +211,8 @@ public class TestNameNodeMXBean {
       assertEquals(NativeIO.POSIX.getCacheManipulator().getMemlockLimit() *
           cluster.getDataNodes().size(),
               mbs.getAttribute(mxbeanName, "CacheCapacity"));
+      assertNull("RollingUpgradeInfo should be null when there is no rolling"
+          + " upgrade", mbs.getAttribute(mxbeanName, "RollingUpgradeStatus"));
     } finally {
       if (cluster != null) {
         for (URI dir : cluster.getNameDirs(0)) {
@@ -206,6 +231,8 @@ public class TestNameNodeMXBean {
     conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_NAMENODE_HEARTBEAT_RECHECK_INTERVAL_KEY, 1);
     MiniDFSCluster cluster = null;
+    FileSystem localFileSys = null;
+    Path dir = null;
 
     try {
       cluster = new MiniDFSCluster.Builder(conf).numDataNodes(3).build();
@@ -218,10 +245,9 @@ public class TestNameNodeMXBean {
         "Hadoop:service=NameNode,name=NameNodeInfo");
 
       // Define include file to generate deadNodes metrics
-      FileSystem localFileSys = FileSystem.getLocal(conf);
+      localFileSys = FileSystem.getLocal(conf);
       Path workingDir = localFileSys.getWorkingDirectory();
-      Path dir = new Path(workingDir,
-        "build/test/data/temp/TestNameNodeMXBean");
+      dir = new Path(workingDir,"build/test/data/temp/TestNameNodeMXBean");
       Path includeFile = new Path(dir, "include");
       assertTrue(localFileSys.mkdirs(dir));
       StringBuilder includeHosts = new StringBuilder();
@@ -250,7 +276,136 @@ public class TestNameNodeMXBean {
         assertTrue(deadNode.containsKey("decommissioned"));
         assertTrue(deadNode.containsKey("xferaddr"));
       }
+    } finally {
+      if ((localFileSys != null) && localFileSys.exists(dir)) {
+        FileUtils.deleteQuietly(new File(dir.toUri().getPath()));
+      }
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
 
+  @Test(timeout=120000)
+  @SuppressWarnings("unchecked")
+  public void testTopUsers() throws Exception {
+    final Configuration conf = new Configuration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      cluster.waitActive();
+      MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+      ObjectName mxbeanNameFsns = new ObjectName(
+          "Hadoop:service=NameNode,name=FSNamesystemState");
+      FileSystem fs = cluster.getFileSystem();
+      final Path path = new Path("/");
+      final int NUM_OPS = 10;
+      for (int i=0; i< NUM_OPS; i++) {
+        fs.listStatus(path);
+        fs.setTimes(path, 0, 1);
+      }
+      String topUsers =
+          (String) (mbs.getAttribute(mxbeanNameFsns, "TopUserOpCounts"));
+      ObjectMapper mapper = new ObjectMapper();
+      Map<String, Object> map = mapper.readValue(topUsers, Map.class);
+      assertTrue("Could not find map key timestamp", 
+          map.containsKey("timestamp"));
+      assertTrue("Could not find map key windows", map.containsKey("windows"));
+      List<Map<String, List<Map<String, Object>>>> windows =
+          (List<Map<String, List<Map<String, Object>>>>) map.get("windows");
+      assertEquals("Unexpected num windows", 3, windows.size());
+      for (Map<String, List<Map<String, Object>>> window : windows) {
+        final List<Map<String, Object>> ops = window.get("ops");
+        assertEquals("Unexpected num ops", 3, ops.size());
+        for (Map<String, Object> op: ops) {
+          final long count = Long.parseLong(op.get("totalCount").toString());
+          final String opType = op.get("opType").toString();
+          final int expected;
+          if (opType.equals(TopConf.ALL_CMDS)) {
+            expected = 2*NUM_OPS;
+          } else {
+            expected = NUM_OPS;
+          }
+          assertEquals("Unexpected total count", expected, count);
+        }
+      }
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test(timeout=120000)
+  public void testTopUsersDisabled() throws Exception {
+    final Configuration conf = new Configuration();
+    // Disable nntop
+    conf.setBoolean(DFSConfigKeys.NNTOP_ENABLED_KEY, false);
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      cluster.waitActive();
+      MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+      ObjectName mxbeanNameFsns = new ObjectName(
+          "Hadoop:service=NameNode,name=FSNamesystemState");
+      FileSystem fs = cluster.getFileSystem();
+      final Path path = new Path("/");
+      final int NUM_OPS = 10;
+      for (int i=0; i< NUM_OPS; i++) {
+        fs.listStatus(path);
+        fs.setTimes(path, 0, 1);
+      }
+      String topUsers =
+          (String) (mbs.getAttribute(mxbeanNameFsns, "TopUserOpCounts"));
+      assertNull("Did not expect to find TopUserOpCounts bean!", topUsers);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test(timeout=120000)
+  public void testTopUsersNoPeriods() throws Exception {
+    final Configuration conf = new Configuration();
+    conf.setBoolean(DFSConfigKeys.NNTOP_ENABLED_KEY, true);
+    conf.set(DFSConfigKeys.NNTOP_WINDOWS_MINUTES_KEY, "");
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      cluster.waitActive();
+      MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+      ObjectName mxbeanNameFsns = new ObjectName(
+          "Hadoop:service=NameNode,name=FSNamesystemState");
+      FileSystem fs = cluster.getFileSystem();
+      final Path path = new Path("/");
+      final int NUM_OPS = 10;
+      for (int i=0; i< NUM_OPS; i++) {
+        fs.listStatus(path);
+        fs.setTimes(path, 0, 1);
+      }
+      String topUsers =
+          (String) (mbs.getAttribute(mxbeanNameFsns, "TopUserOpCounts"));
+      assertNotNull("Expected TopUserOpCounts bean!", topUsers);
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test(timeout = 120000)
+  public void testQueueLength() throws Exception {
+    final Configuration conf = new Configuration();
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(0).build();
+      cluster.waitActive();
+      MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+      ObjectName mxbeanNameFs =
+          new ObjectName("Hadoop:service=NameNode,name=FSNamesystem");
+      int queueLength = (int) mbs.getAttribute(mxbeanNameFs, "LockQueueLength");
+      assertEquals(0, queueLength);
     } finally {
       if (cluster != null) {
         cluster.shutdown();

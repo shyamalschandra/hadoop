@@ -54,6 +54,7 @@ import org.apache.hadoop.fs.LocalDirAllocator;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.fs.s3.S3Exception;
+import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.retry.RetryPolicies;
 import org.apache.hadoop.io.retry.RetryPolicy;
 import org.apache.hadoop.io.retry.RetryProxy;
@@ -62,24 +63,29 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * <p>
  * A {@link FileSystem} for reading and writing files stored on
  * <a href="http://aws.amazon.com/s3">Amazon S3</a>.
  * Unlike {@link org.apache.hadoop.fs.s3.S3FileSystem} this implementation
  * stores files on S3 in their
  * native form so they can be read by other S3 tools.
- *
+ * <p>
  * A note about directories. S3 of course has no "native" support for them.
  * The idiom we choose then is: for any directory created by this class,
  * we use an empty object "#{dirpath}_$folder$" as a marker.
  * Further, to interoperate with other S3 tools, we also accept the following:
- *  - an object "#{dirpath}/' denoting a directory marker
- *  - if there exists any objects with the prefix "#{dirpath}/", then the
- *    directory is said to exist
- *  - if both a file with the name of a directory and a marker for that
- *    directory exists, then the *file masks the directory*, and the directory
- *    is never returned.
- * </p>
+ * <ul>
+ *   <li>an object "#{dirpath}/' denoting a directory marker</li>
+ *   <li>
+ *     if there exists any objects with the prefix "#{dirpath}/", then the
+ *     directory is said to exist
+ *   </li>
+ *   <li>
+ *     if both a file with the name of a directory and a marker for that
+ *     directory exists, then the *file masks the directory*, and the directory
+ *     is never returned.
+ *   </li>
+ * </ul>
+ *
  * @see org.apache.hadoop.fs.s3.S3FileSystem
  */
 @InterfaceAudience.Public
@@ -119,7 +125,7 @@ public class NativeS3FileSystem extends FileSystem {
             key);
         LOG.debug("{}", e, e);
         try {
-          seek(pos);
+          reopen(pos);
           result = in.read();
         } catch (EOFException eof) {
           LOG.debug("EOF on input stream read: {}", eof, eof);
@@ -148,7 +154,7 @@ public class NativeS3FileSystem extends FileSystem {
       } catch (IOException e) {
         LOG.info( "Received IOException while reading '{}'," +
                   " attempting to reopen.", key);
-        seek(pos);
+        reopen(pos);
         result = in.read(b, off, len);
       }
       if (result > 0) {
@@ -168,16 +174,21 @@ public class NativeS3FileSystem extends FileSystem {
     /**
      * Close the inner stream if not null. Even if an exception
      * is raised during the close, the field is set to null
-     * @throws IOException if raised by the close() operation.
      */
-    private void closeInnerStream() throws IOException {
-      if (in != null) {
-        try {
-          in.close();
-        } finally {
-          in = null;
-        }
-      }
+    private void closeInnerStream() {
+      IOUtils.closeStream(in);
+      in = null;
+    }
+
+    /**
+     * Reopen a new input stream with the specified position
+     * @param pos the position to reopen a new stream
+     * @throws IOException
+     */
+    private synchronized void reopen(long pos) throws IOException {
+        LOG.debug("Reopening key '{}' for reading at position '{}", key, pos);
+        InputStream newStream = store.retrieve(key, pos);
+        updateInnerStream(newStream, pos);
     }
 
     /**
@@ -202,9 +213,7 @@ public class NativeS3FileSystem extends FileSystem {
       }
       if (pos != newpos) {
         // the seek is attempting to move the current position
-        LOG.debug("Opening key '{}' for reading at position '{}", key, newpos);
-        InputStream newStream = store.retrieve(key, newpos);
-        updateInnerStream(newStream, newpos);
+        reopen(newpos);
       }
     }
 
@@ -308,7 +317,6 @@ public class NativeS3FileSystem extends FileSystem {
 
   /**
    * Return the protocol scheme for the FileSystem.
-   * <p/>
    *
    * @return <code>s3n</code>
    */

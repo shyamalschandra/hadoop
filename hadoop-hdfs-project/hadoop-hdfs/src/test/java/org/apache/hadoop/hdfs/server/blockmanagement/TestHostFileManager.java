@@ -18,6 +18,7 @@
 package org.apache.hadoop.hdfs.server.blockmanagement;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.protocol.DatanodeID;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
@@ -103,23 +104,22 @@ public class TestHostFileManager {
     BlockManager bm = mock(BlockManager.class);
     FSNamesystem fsn = mock(FSNamesystem.class);
     Configuration conf = new Configuration();
-    HostFileManager hm = mock(HostFileManager.class);
+    HostFileManager hm = new HostFileManager();
     HostFileManager.HostSet includedNodes = new HostFileManager.HostSet();
     HostFileManager.HostSet excludedNodes = new HostFileManager.HostSet();
 
     includedNodes.add(entry("127.0.0.1:12345"));
     includedNodes.add(entry("localhost:12345"));
     includedNodes.add(entry("127.0.0.1:12345"));
-
     includedNodes.add(entry("127.0.0.2"));
+
     excludedNodes.add(entry("127.0.0.1:12346"));
     excludedNodes.add(entry("127.0.30.1:12346"));
 
     Assert.assertEquals(2, includedNodes.size());
     Assert.assertEquals(2, excludedNodes.size());
 
-    doReturn(includedNodes).when(hm).getIncludes();
-    doReturn(excludedNodes).when(hm).getExcludes();
+    hm.refresh(includedNodes, excludedNodes);
 
     DatanodeManager dm = new DatanodeManager(bm, fsn, conf);
     Whitebox.setInternalState(dm, "hostFileManager", hm);
@@ -142,7 +142,7 @@ public class TestHostFileManager {
             .DatanodeReportType.DEAD).size());
     DatanodeDescriptor spam = new DatanodeDescriptor(new DatanodeID("127.0.0" +
             ".3", "127.0.0.3", "uuid-spam", 12345, 1020, 1021, 1022));
-    spam.setLastUpdate(0);
+    DFSTestUtil.setDatanodeDead(spam);
     includedNodes.add(entry("127.0.0.3:12345"));
     dnMap.put("uuid-spam", spam);
     Assert.assertEquals(1, dm.getDatanodeListForReport(HdfsConstants

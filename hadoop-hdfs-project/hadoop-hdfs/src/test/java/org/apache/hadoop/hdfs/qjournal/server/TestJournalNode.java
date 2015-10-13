@@ -27,19 +27,18 @@ import java.io.File;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.qjournal.QJMTestUtil;
 import org.apache.hadoop.hdfs.qjournal.client.IPCLoggerChannel;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.NewEpochResponseProto;
 import org.apache.hadoop.hdfs.qjournal.protocol.QJournalProtocolProtos.PrepareRecoveryResponseProto;
-import org.apache.hadoop.hdfs.qjournal.server.Journal;
-import org.apache.hadoop.hdfs.qjournal.server.JournalNode;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeLayoutVersion;
 import org.apache.hadoop.hdfs.server.protocol.NamespaceInfo;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
@@ -48,12 +47,12 @@ import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.MetricsAsserts;
 import org.apache.hadoop.test.PathUtils;
 import org.apache.hadoop.util.Shell;
+import org.apache.hadoop.util.StopWatch;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
 import com.google.common.base.Charsets;
-import com.google.common.base.Stopwatch;
 import com.google.common.primitives.Bytes;
 import com.google.common.primitives.Ints;
 
@@ -107,7 +106,9 @@ public class TestJournalNode {
     MetricsAsserts.assertCounter("BatchesWritten", 0L, metrics);
     MetricsAsserts.assertCounter("BatchesWrittenWhileLagging", 0L, metrics);
     MetricsAsserts.assertGauge("CurrentLagTxns", 0L, metrics);
+    MetricsAsserts.assertGauge("LastJournalTimestamp", 0L, metrics);
 
+    long beginTimestamp = System.currentTimeMillis();
     IPCLoggerChannel ch = new IPCLoggerChannel(
         conf, FAKE_NSINFO, journalId, jn.getBoundIpcAddress());
     ch.newEpoch(1).get();
@@ -120,6 +121,10 @@ public class TestJournalNode {
     MetricsAsserts.assertCounter("BatchesWritten", 1L, metrics);
     MetricsAsserts.assertCounter("BatchesWrittenWhileLagging", 0L, metrics);
     MetricsAsserts.assertGauge("CurrentLagTxns", 0L, metrics);
+    long lastJournalTimestamp = MetricsAsserts.getLongGauge(
+        "LastJournalTimestamp", metrics);
+    assertTrue(lastJournalTimestamp > beginTimestamp);
+    beginTimestamp = lastJournalTimestamp;
 
     ch.setCommittedTxId(100L);
     ch.sendEdits(1L, 2, 1, "goodbye".getBytes(Charsets.UTF_8)).get();
@@ -129,6 +134,9 @@ public class TestJournalNode {
     MetricsAsserts.assertCounter("BatchesWritten", 2L, metrics);
     MetricsAsserts.assertCounter("BatchesWrittenWhileLagging", 1L, metrics);
     MetricsAsserts.assertGauge("CurrentLagTxns", 98L, metrics);
+    lastJournalTimestamp = MetricsAsserts.getLongGauge(
+        "LastJournalTimestamp", metrics);
+    assertTrue(lastJournalTimestamp > beginTimestamp);
 
   }
   
@@ -186,7 +194,7 @@ public class TestJournalNode {
     byte[] retrievedViaHttp = DFSTestUtil.urlGetBytes(new URL(urlRoot +
         "/getJournal?segmentTxId=1&jid=" + journalId));
     byte[] expected = Bytes.concat(
-            Ints.toByteArray(HdfsConstants.NAMENODE_LAYOUT_VERSION),
+            Ints.toByteArray(HdfsServerConstants.NAMENODE_LAYOUT_VERSION),
             (new byte[] { 0, 0, 0, 0 }), // layout flags section
             EDITS_DATA);
 
@@ -271,6 +279,7 @@ public class TestJournalNode {
   public void testFailToStartWithBadConfig() throws Exception {
     Configuration conf = new Configuration();
     conf.set(DFSConfigKeys.DFS_JOURNALNODE_EDITS_DIR_KEY, "non-absolute-path");
+    conf.set(DFSConfigKeys.DFS_JOURNALNODE_HTTP_ADDRESS_KEY, "0.0.0.0:0");
     assertJNFailsToStart(conf, "should be an absolute path");
     
     // Existing file which is not a directory 
@@ -320,11 +329,11 @@ public class TestJournalNode {
     ch.setEpoch(1);
     ch.startLogSegment(1, NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION).get();
     
-    Stopwatch sw = new Stopwatch().start();
+    StopWatch sw = new StopWatch().start();
     for (int i = 1; i < numEdits; i++) {
       ch.sendEdits(1L, i, 1, data).get();
     }
-    long time = sw.elapsedMillis();
+    long time = sw.now(TimeUnit.MILLISECONDS);
     
     System.err.println("Wrote " + numEdits + " batches of " + editsSize +
         " bytes in " + time + "ms");

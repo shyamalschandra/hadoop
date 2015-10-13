@@ -22,12 +22,15 @@ import java.io.IOException;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.StorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NodeType;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage;
 import org.apache.hadoop.util.VersionInfo;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 
 /**
  * NamespaceInfo is returned by the name-node in reply 
@@ -40,19 +43,61 @@ public class NamespaceInfo extends StorageInfo {
   final String  buildVersion;
   String blockPoolID = "";    // id of the block pool
   String softwareVersion;
+  long capabilities;
 
+  // only authoritative on the server-side to determine advertisement to
+  // clients.  enum will update the supported values
+  private static final long CAPABILITIES_SUPPORTED = getSupportedCapabilities();
+
+  private static long getSupportedCapabilities() {
+    long mask = 0;
+    for (Capability c : Capability.values()) {
+      if (c.supported) {
+        mask |= c.mask;
+      }
+    }
+    return mask;
+  }
+
+  public enum Capability {
+    UNKNOWN(false),
+    STORAGE_BLOCK_REPORT_BUFFERS(true); // use optimized ByteString buffers
+    private final boolean supported;
+    private final long mask;
+    Capability(boolean isSupported) {
+      supported = isSupported;
+      int bits = ordinal() - 1;
+      mask = (bits < 0) ? 0 : (1L << bits);
+    }
+    public long getMask() {
+      return mask;
+    }
+  }
+
+  // defaults to enabled capabilites since this ctor is for server
   public NamespaceInfo() {
     super(NodeType.NAME_NODE);
     buildVersion = null;
+    capabilities = CAPABILITIES_SUPPORTED;
   }
 
+  // defaults to enabled capabilites since this ctor is for server
   public NamespaceInfo(int nsID, String clusterID, String bpID,
       long cT, String buildVersion, String softwareVersion) {
-    super(HdfsConstants.NAMENODE_LAYOUT_VERSION, nsID, clusterID, cT,
+    this(nsID, clusterID, bpID, cT, buildVersion, softwareVersion,
+        CAPABILITIES_SUPPORTED);
+  }
+
+  // for use by server and/or client
+  public NamespaceInfo(int nsID, String clusterID, String bpID,
+      long cT, String buildVersion, String softwareVersion,
+      long capabilities) {
+    super(HdfsServerConstants.NAMENODE_LAYOUT_VERSION, nsID, clusterID, cT,
         NodeType.NAME_NODE);
     blockPoolID = bpID;
     this.buildVersion = buildVersion;
     this.softwareVersion = softwareVersion;
+    this.capabilities = capabilities;
   }
 
   public NamespaceInfo(int nsID, String clusterID, String bpID, 
@@ -61,6 +106,22 @@ public class NamespaceInfo extends StorageInfo {
         VersionInfo.getVersion());
   }
   
+  public long getCapabilities() {
+    return capabilities;
+  }
+
+  @VisibleForTesting
+  public void setCapabilities(long capabilities) {
+    this.capabilities = capabilities;
+  }
+
+  public boolean isCapabilitySupported(Capability capability) {
+    Preconditions.checkArgument(capability != Capability.UNKNOWN,
+        "cannot test for unknown capability");
+    long mask = capability.getMask();
+    return (capabilities & mask) == mask;
+  }
+
   public String getBuildVersion() {
     return buildVersion;
   }

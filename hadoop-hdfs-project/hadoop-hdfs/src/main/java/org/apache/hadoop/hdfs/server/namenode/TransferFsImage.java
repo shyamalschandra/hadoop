@@ -43,8 +43,8 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
-import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.common.Storage;
 import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.common.StorageErrorReporter;
@@ -70,13 +70,40 @@ import org.mortbay.jetty.EofException;
  */
 @InterfaceAudience.Private
 public class TransferFsImage {
-  
+
+  public enum TransferResult{
+    SUCCESS(HttpServletResponse.SC_OK, false),
+    AUTHENTICATION_FAILURE(HttpServletResponse.SC_FORBIDDEN, true),
+    NOT_ACTIVE_NAMENODE_FAILURE(HttpServletResponse.SC_EXPECTATION_FAILED, false),
+    OLD_TRANSACTION_ID_FAILURE(HttpServletResponse.SC_CONFLICT, false),
+    UNEXPECTED_FAILURE(-1, true);
+
+    private final int response;
+    private final boolean shouldReThrowException;
+
+    private TransferResult(int response, boolean rethrow) {
+      this.response = response;
+      this.shouldReThrowException = rethrow;
+    }
+
+    public static TransferResult getResultForCode(int code){
+      TransferResult ret = UNEXPECTED_FAILURE;
+      for(TransferResult result:TransferResult.values()){
+        if(result.response == code){
+          return result;
+        }
+      }
+      return ret;
+    }
+  }
+
   public final static String CONTENT_LENGTH = "Content-Length";
   public final static String FILE_LENGTH = "File-Length";
   public final static String MD5_HEADER = "X-MD5-Digest";
 
   private final static String CONTENT_TYPE = "Content-Type";
   private final static String CONTENT_TRANSFER_ENCODING = "Content-Transfer-Encoding";
+  private final static int IO_FILE_BUFFER_SIZE;
 
   @VisibleForTesting
   static int timeout = 0;
@@ -88,6 +115,7 @@ public class TransferFsImage {
     connectionFactory = URLConnectionFactory
         .newDefaultURLConnectionFactory(conf);
     isSpnegoEnabled = UserGroupInformation.isSecurityEnabled();
+    IO_FILE_BUFFER_SIZE = DFSUtilClient.getIoFileBufferSize(conf);
   }
 
   private static final Log LOG = LogFactory.getLog(TransferFsImage.class);
@@ -196,9 +224,9 @@ public class TransferFsImage {
    * @param txid the transaction ID of the image to be uploaded
    * @throws IOException if there is an I/O error
    */
-  public static void uploadImageFromStorage(URL fsName, Configuration conf,
+  public static TransferResult uploadImageFromStorage(URL fsName, Configuration conf,
       NNStorage storage, NameNodeFile nnf, long txid) throws IOException {
-    uploadImageFromStorage(fsName, conf, storage, nnf, txid, null);
+    return uploadImageFromStorage(fsName, conf, storage, nnf, txid, null);
   }
 
   /**
@@ -213,7 +241,7 @@ public class TransferFsImage {
    * @param canceler optional canceler to check for abort of upload
    * @throws IOException if there is an I/O error or cancellation
    */
-  public static void uploadImageFromStorage(URL fsName, Configuration conf,
+  public static TransferResult uploadImageFromStorage(URL fsName, Configuration conf,
       NNStorage storage, NameNodeFile nnf, long txid, Canceler canceler)
       throws IOException {
     URL url = new URL(fsName, ImageServlet.PATH_SPEC);
@@ -221,21 +249,18 @@ public class TransferFsImage {
     try {
       uploadImage(url, conf, storage, nnf, txid, canceler);
     } catch (HttpPutFailedException e) {
-      if (e.getResponseCode() == HttpServletResponse.SC_CONFLICT) {
-        // this is OK - this means that a previous attempt to upload
-        // this checkpoint succeeded even though we thought it failed.
-        LOG.info("Image upload with txid " + txid + 
-            " conflicted with a previous image upload to the " +
-            "same NameNode. Continuing...", e);
-        return;
-      } else {
+      // translate the error code to a result, which is a bit more obvious in usage
+      TransferResult result = TransferResult.getResultForCode(e.getResponseCode());
+      if (result.shouldReThrowException) {
         throw e;
       }
+      return result;
     }
     double xferSec = Math.max(
         ((float) (Time.monotonicNow() - startTime)) / 1000.0, 0.001);
     LOG.info("Uploaded image with txid " + txid + " to namenode at " + fsName
         + " in " + xferSec + " seconds");
+    return TransferResult.SUCCESS;
   }
 
   /*
@@ -291,7 +316,9 @@ public class TransferFsImage {
 
       int responseCode = connection.getResponseCode();
       if (responseCode != HttpURLConnection.HTTP_OK) {
-        throw new HttpPutFailedException(connection.getResponseMessage(),
+        throw new HttpPutFailedException(String.format(
+            "Image uploading failed, status: %d, url: %s, message: %s",
+            responseCode, urlWithParams, connection.getResponseMessage()),
             responseCode);
       }
     } catch (AuthenticationException e) {
@@ -334,7 +361,7 @@ public class TransferFsImage {
   private static void copyFileToStream(OutputStream out, File localfile,
       FileInputStream infile, DataTransferThrottler throttler,
       Canceler canceler) throws IOException {
-    byte buf[] = new byte[HdfsConstants.IO_FILE_BUFFER_SIZE];
+    byte buf[] = new byte[IO_FILE_BUFFER_SIZE];
     try {
       CheckpointFaultInjector.getInstance()
           .aboutToSendFile(localfile);
@@ -343,7 +370,7 @@ public class TransferFsImage {
             shouldSendShortFile(localfile)) {
           // Test sending image shorter than localfile
           long len = localfile.length();
-          buf = new byte[(int)Math.min(len/2, HdfsConstants.IO_FILE_BUFFER_SIZE)];
+          buf = new byte[(int)Math.min(len/2, IO_FILE_BUFFER_SIZE)];
           // This will read at most half of the image
           // and the rest of the image will be sent over the wire
           infile.read(buf);
@@ -508,7 +535,7 @@ public class TransferFsImage {
       }
       
       int num = 1;
-      byte[] buf = new byte[HdfsConstants.IO_FILE_BUFFER_SIZE];
+      byte[] buf = new byte[IO_FILE_BUFFER_SIZE];
       while (num > 0) {
         num = stream.read(buf);
         if (num > 0) {
@@ -528,10 +555,18 @@ public class TransferFsImage {
         fos.getChannel().force(true);
         fos.close();
       }
+
+      // Something went wrong and did not finish reading.
+      // Remove the temporary files.
+      if (!finishedReceiving) {
+        deleteTmpFiles(localPaths);
+      }
+
       if (finishedReceiving && received != advertisedSize) {
         // only throw this exception if we think we read all of it on our end
         // -- otherwise a client-side IOException would be masked by this
         // exception that makes it look like a server-side problem!
+        deleteTmpFiles(localPaths);
         throw new IOException("File " + url + " received length " + received +
                               " is not of the advertised size " +
                               advertisedSize);
@@ -548,6 +583,7 @@ public class TransferFsImage {
       
       if (advertisedDigest != null &&
           !computedDigest.equals(advertisedDigest)) {
+        deleteTmpFiles(localPaths);
         throw new IOException("File " + url + " computed digest " +
             computedDigest + " does not match advertised digest " + 
             advertisedDigest);
@@ -556,6 +592,19 @@ public class TransferFsImage {
     } else {
       return null;
     }    
+  }
+
+  private static void deleteTmpFiles(List<File> files) {
+    if (files == null) {
+      return;
+    }
+
+    LOG.info("Deleting temporary files: " + files);
+    for (File file : files) {
+      if (!file.delete()) {
+        LOG.warn("Deleting " + file + " has failed");
+      }
+    }
   }
 
   private static MD5Hash parseMD5Header(HttpURLConnection connection) {

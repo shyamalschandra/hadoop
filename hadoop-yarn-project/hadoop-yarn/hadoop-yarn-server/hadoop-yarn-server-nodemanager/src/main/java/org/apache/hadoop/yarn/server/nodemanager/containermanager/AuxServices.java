@@ -128,7 +128,7 @@ public class AuxServices extends AbstractService
         // TODO better use s.getName()?
         if(!sName.equals(s.getName())) {
           LOG.warn("The Auxilurary Service named '"+sName+"' in the "
-                  +"configuration is for class "+sClass+" which has "
+                  +"configuration is for "+sClass+" which has "
                   +"a name of '"+s.getName()+"'. Because these are "
                   +"not the same tools trying to send ServiceData and read "
                   +"Service Meta Data may have issues unless the refer to "
@@ -225,7 +225,8 @@ public class AuxServices extends AbstractService
           try {
             serv.initializeContainer(new ContainerInitializationContext(
                 event.getUser(), event.getContainer().getContainerId(),
-                event.getContainer().getResource()));
+                event.getContainer().getResource(), event.getContainer()
+                .getContainerTokenIdentifier().getContainerType()));
           } catch (Throwable th) {
             logWarningWhenAuxServiceThrowExceptions(serv,
                 AuxServicesEventType.CONTAINER_INIT, th);
@@ -237,7 +238,8 @@ public class AuxServices extends AbstractService
           try {
             serv.stopContainer(new ContainerTerminationContext(
                 event.getUser(), event.getContainer().getContainerId(),
-                event.getContainer().getResource()));
+                event.getContainer().getResource(), event.getContainer()
+                .getContainerTokenIdentifier().getContainerType()));
           } catch (Throwable th) {
             logWarningWhenAuxServiceThrowExceptions(serv,
                 AuxServicesEventType.CONTAINER_STOP, th);

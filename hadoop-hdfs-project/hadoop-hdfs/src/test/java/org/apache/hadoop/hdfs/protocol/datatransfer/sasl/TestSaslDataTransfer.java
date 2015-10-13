@@ -17,14 +17,16 @@
  */
 package org.apache.hadoop.hdfs.protocol.datatransfer.sasl;
 
-import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_DATA_TRANSFER_PROTECTION_KEY;
+import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_DATA_TRANSFER_PROTECTION_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_HTTP_POLICY_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.IGNORE_SECURE_PORTS_FOR_TESTING_KEY;
-
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 
 import java.io.IOException;
 
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileSystemTestHelper;
@@ -32,9 +34,14 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.client.HdfsClientConfigKeys;
+import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.GenericTestUtils.LogCapturer;
 import org.junit.After;
+import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
@@ -43,10 +50,8 @@ import org.junit.rules.Timeout;
 public class TestSaslDataTransfer extends SaslDataTransferTestCase {
 
   private static final int BLOCK_SIZE = 4096;
-  private static final int BUFFER_SIZE= 1024;
   private static final int NUM_BLOCKS = 3;
   private static final Path PATH  = new Path("/file1");
-  private static final short REPLICATION = 3;
 
   private MiniDFSCluster cluster;
   private FileSystem fs;
@@ -110,12 +115,28 @@ public class TestSaslDataTransfer extends SaslDataTransferTestCase {
   public void testServerSaslNoClientSasl() throws Exception {
     HdfsConfiguration clusterConf = createSecureConfig(
       "authentication,integrity,privacy");
+    // Set short retry timeouts so this test runs faster
+    clusterConf.setInt(HdfsClientConfigKeys.Retry.WINDOW_BASE_KEY, 10);
     startCluster(clusterConf);
     HdfsConfiguration clientConf = new HdfsConfiguration(clusterConf);
     clientConf.set(DFS_DATA_TRANSFER_PROTECTION_KEY, "");
-    exception.expect(IOException.class);
-    exception.expectMessage("could only be replicated to 0 nodes");
-    doTest(clientConf);
+
+    LogCapturer logs = GenericTestUtils.LogCapturer.captureLogs(
+        LogFactory.getLog(DataNode.class));
+    try {
+      doTest(clientConf);
+      Assert.fail("Should fail if SASL data transfer protection is not " +
+          "configured or not supported in client");
+    } catch (IOException e) {
+      GenericTestUtils.assertMatches(e.getMessage(), 
+          "could only be replicated to 0 nodes");
+    } finally {
+      logs.stopCapturing();
+    }
+
+    GenericTestUtils.assertMatches(logs.getOutput(),
+        "Failed to read expected SASL data transfer protection " +
+        "handshake from client at");
   }
 
   @Test

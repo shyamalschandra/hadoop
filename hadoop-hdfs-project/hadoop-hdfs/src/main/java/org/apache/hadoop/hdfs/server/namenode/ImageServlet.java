@@ -30,7 +30,9 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.hadoop.ha.HAServiceProtocol;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -81,9 +83,9 @@ public class ImageServlet extends HttpServlet {
   private static final String LATEST_FSIMAGE_VALUE = "latest";
   private static final String IMAGE_FILE_TYPE = "imageFile";
 
-  private static final Set<Long> currentlyDownloadingCheckpoints =
-    Collections.synchronizedSet(new HashSet<Long>());
-  
+  private SortedSet<ImageUploadRequest> currentlyDownloadingCheckpoints = Collections
+      .<ImageUploadRequest> synchronizedSortedSet(new TreeSet<ImageUploadRequest>());
+
   @Override
   public void doGet(final HttpServletRequest request,
       final HttpServletResponse response) throws ServletException, IOException {
@@ -236,7 +238,7 @@ public class ImageServlet extends HttpServlet {
 
     validRequestors.add(SecurityUtil.getServerPrincipal(conf
         .get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY),
-        NameNode.getAddress(conf).getHostName()));
+        DFSUtilClient.getNNAddress(conf).getHostName()));
     try {
       validRequestors.add(
           SecurityUtil.getServerPrincipal(conf
@@ -250,16 +252,18 @@ public class ImageServlet extends HttpServlet {
         DFSConfigKeys.DFS_SECONDARY_NAMENODE_KERBEROS_PRINCIPAL_KEY,
         conf.get(DFSConfigKeys.DFS_SECONDARY_NAMENODE_KERBEROS_PRINCIPAL_KEY),
         DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY,
-        conf.get(DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY,
+        conf.getTrimmed(DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY,
           DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_DEFAULT));
       LOG.warn(msg);
     }
 
     if (HAUtil.isHAEnabled(conf, DFSUtil.getNamenodeNameServiceId(conf))) {
-      Configuration otherNnConf = HAUtil.getConfForOtherNode(conf);
-      validRequestors.add(SecurityUtil.getServerPrincipal(otherNnConf
-          .get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY),
-          NameNode.getAddress(otherNnConf).getHostName()));
+      List<Configuration> otherNnConfs = HAUtil.getConfForOtherNodes(conf);
+      for (Configuration otherNnConf : otherNnConfs) {
+        validRequestors.add(SecurityUtil.getServerPrincipal(otherNnConf
+                .get(DFSConfigKeys.DFS_NAMENODE_KERBEROS_PRINCIPAL_KEY),
+            DFSUtilClient.getNNAddress(otherNnConf).getHostName()));
+      }
     }
 
     for (String v : validRequestors) {
@@ -423,7 +427,6 @@ public class ImageServlet extends HttpServlet {
   /**
    * Set the required parameters for uploading image
    * 
-   * @param httpMethod instance of method to set the parameters
    * @param storage colon separated storageInfo string
    * @param txid txid of the image
    * @param imageFileSize size of the imagefile to be uploaded
@@ -462,22 +465,50 @@ public class ImageServlet extends HttpServlet {
 
             @Override
             public Void run() throws Exception {
+              // if its not the active NN, then we need to notify the caller it was was the wrong
+              // target (regardless of the fact that we got the image)
+              HAServiceProtocol.HAServiceState state = NameNodeHttpServer
+                  .getNameNodeStateFromContext(getServletContext());
+              if (state != HAServiceProtocol.HAServiceState.ACTIVE) {
+                // we need a different response type here so the client can differentiate this
+                // from the failure to upload due to (1) security, or (2) other checkpoints already
+                // present
+                response.sendError(HttpServletResponse.SC_EXPECTATION_FAILED,
+                    "Nameode "+request.getLocalAddr()+" is currently not in a state which can "
+                        + "accept uploads of new fsimages. State: "+state);
+                return null;
+              }
 
               final long txid = parsedParams.getTxId();
+              String remoteAddr = request.getRemoteAddr();
+              ImageUploadRequest imageRequest = new ImageUploadRequest(txid, remoteAddr);
 
               final NameNodeFile nnf = parsedParams.getNameNodeFile();
 
-              if (!currentlyDownloadingCheckpoints.add(txid)) {
+              // if the node is attempting to upload an older transaction, we ignore it
+              SortedSet<ImageUploadRequest> larger = currentlyDownloadingCheckpoints.tailSet(imageRequest);
+              if (larger.size() > 0) {
                 response.sendError(HttpServletResponse.SC_CONFLICT,
-                    "Another checkpointer is already in the process of uploading a"
-                        + " checkpoint made at transaction ID " + txid);
+                    "Another checkpointer is already in the process of uploading a" +
+                        " checkpoint made up to transaction ID " + larger.last());
+                return null;
+              }
+
+              //make sure no one else has started uploading one
+              if (!currentlyDownloadingCheckpoints.add(imageRequest)) {
+                response.sendError(HttpServletResponse.SC_CONFLICT,
+                    "Either current namenode is checkpointing or another"
+                        + " checkpointer is already in the process of "
+                        + "uploading a checkpoint made at transaction ID "
+                        + txid);
                 return null;
               }
               try {
                 if (nnImage.getStorage().findImageFile(nnf, txid) != null) {
                   response.sendError(HttpServletResponse.SC_CONFLICT,
-                      "Another checkpointer already uploaded an checkpoint "
-                          + "for txid " + txid);
+                      "Either current namenode has checkpointed or "
+                          + "another checkpointer already uploaded an "
+                          + "checkpoint for txid " + txid);
                   return null;
                 }
 
@@ -499,10 +530,14 @@ public class ImageServlet extends HttpServlet {
                   // remove some old ones.
                   nnImage.purgeOldStorage(nnf);
                 } finally {
+                  // remove the request once we've processed it, or it threw an error, so we
+                  // aren't using it either
+                  currentlyDownloadingCheckpoints.remove(imageRequest);
+
                   stream.close();
                 }
               } finally {
-                currentlyDownloadingCheckpoints.remove(txid);
+                nnImage.removeFromCheckpointing(txid);
               }
               return null;
             }
@@ -553,6 +588,48 @@ public class ImageServlet extends HttpServlet {
 
     public NameNodeFile getNameNodeFile() {
       return nnf;
+    }
+  }
+
+  private static class ImageUploadRequest implements Comparable<ImageUploadRequest> {
+
+    private final long txId;
+    private final String address;
+
+    public ImageUploadRequest(long txid, String remoteAddr) {
+      this.txId = txid;
+      this.address = remoteAddr;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+
+      ImageUploadRequest that = (ImageUploadRequest) o;
+
+      if (txId != that.txId) return false;
+      if (!address.equals(that.address)) return false;
+
+      return true;
+    }
+
+    @Override
+    public int hashCode() {
+      int result = (int) (txId ^ (txId >>> 32));
+      result = 31 * result + address.hashCode();
+      return result;
+    }
+
+    @Override public int compareTo(ImageUploadRequest other) {
+      return Long.compare(txId, other.txId);
+    }
+
+    @Override public String toString() {
+      return "ImageRequest{" +
+          "txId=" + txId +
+          ", address='" + address + '\'' +
+          '}';
     }
   }
 }

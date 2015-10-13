@@ -21,6 +21,7 @@ package org.apache.hadoop.fs.http.server;
 
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.fs.http.client.HttpFSFileSystem;
+import org.apache.hadoop.util.StringUtils;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -50,7 +51,7 @@ public class CheckUploadContentTypeFilter implements Filter {
 
   /**
    * Initializes the filter.
-   * <p/>
+   * <p>
    * This implementation is a NOP.
    *
    * @param config filter configuration.
@@ -69,8 +70,8 @@ public class CheckUploadContentTypeFilter implements Filter {
    * @param response servlet response.
    * @param chain filter chain.
    *
-   * @throws IOException thrown if an IO error occurrs.
-   * @throws ServletException thrown if a servet error occurrs.
+   * @throws IOException thrown if an IO error occurs.
+   * @throws ServletException thrown if a servlet error occurs.
    */
   @Override
   public void doFilter(ServletRequest request, ServletResponse response,
@@ -82,7 +83,8 @@ public class CheckUploadContentTypeFilter implements Filter {
     String method = httpReq.getMethod();
     if (method.equals("PUT") || method.equals("POST")) {
       String op = httpReq.getParameter(HttpFSFileSystem.OP_PARAM);
-      if (op != null && UPLOAD_OPERATIONS.contains(op.toUpperCase())) {
+      if (op != null && UPLOAD_OPERATIONS.contains(
+          StringUtils.toUpperCase(op))) {
         if ("true".equalsIgnoreCase(httpReq.getParameter(HttpFSParametersProvider.DataParam.NAME))) {
           String contentType = httpReq.getContentType();
           contentTypeOK =
@@ -103,7 +105,7 @@ public class CheckUploadContentTypeFilter implements Filter {
 
   /**
    * Destroys the filter.
-   * <p/>
+   * <p>
    * This implementation is a NOP.
    */
   @Override

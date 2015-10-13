@@ -25,16 +25,15 @@ import static org.junit.Assert.fail;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.PrintStream;
 import java.io.RandomAccessFile;
-import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Random;
 
-import org.apache.commons.logging.impl.Log4JLogger;
+import org.apache.commons.io.output.NullOutputStream;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -74,7 +73,7 @@ import org.junit.rules.ExpectedException;
  */
 public class TestSnapshot {
   {
-    ((Log4JLogger)INode.LOG).getLogger().setLevel(Level.ALL);
+    GenericTestUtils.setLogLevel(INode.LOG, Level.ALL);
     SnapshotTestHelper.disableLogs();
   }
 
@@ -256,8 +255,7 @@ public class TestSnapshot {
         FSImageTestUtil.getFSImage(
         cluster.getNameNode()).getStorage().getStorageDir(0));
     assertNotNull("Didn't generate or can't find fsimage", originalFsimage);
-    StringWriter output = new StringWriter();
-    PrintWriter o = new PrintWriter(output);
+    PrintStream o = new PrintStream(NullOutputStream.NULL_OUTPUT_STREAM);
     PBImageXmlWriter v = new PBImageXmlWriter(new Configuration(), o);
     v.visit(new RandomAccessFile(originalFsimage, "r"));
   }

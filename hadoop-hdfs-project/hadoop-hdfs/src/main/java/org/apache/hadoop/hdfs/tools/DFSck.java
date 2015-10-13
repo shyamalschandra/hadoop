@@ -32,6 +32,7 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSUtil;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HAUtil;
@@ -74,11 +75,12 @@ public class DFSck extends Configured implements Tool {
     HdfsConfiguration.init();
   }
 
-  private static final String USAGE = "Usage: DFSck <path> "
+  private static final String USAGE = "Usage: hdfs fsck <path> "
       + "[-list-corruptfileblocks | "
       + "[-move | -delete | -openforwrite] "
-      + "[-files [-blocks [-locations | -racks]]]] "
-      + "[-includeSnapshots] [-showprogress]\n"
+      + "[-files [-blocks [-locations | -racks | -replicaDetails]]]] "
+      + "[-includeSnapshots] [-showprogress] "
+      + "[-storagepolicies] [-blockId <blk_Id>]\n"
       + "\t<path>\tstart checking from this path\n"
       + "\t-move\tmove corrupted files to /lost+found\n"
       + "\t-delete\tdelete corrupted files\n"
@@ -89,9 +91,12 @@ public class DFSck extends Configured implements Tool {
       + "snapshottable directories under it\n"
       + "\t-list-corruptfileblocks\tprint out list of missing "
       + "blocks and files they belong to\n"
-      + "\t-blocks\tprint out block report\n"
-      + "\t-locations\tprint out locations for every block\n"
-      + "\t-racks\tprint out network topology for data-node locations\n"
+      + "\t-files -blocks\tprint out block report\n"
+      + "\t-files -blocks -locations\tprint out locations for every block\n"
+      + "\t-files -blocks -racks" 
+      + "\tprint out network topology for data-node locations\n"
+      + "\t-files -blocks -replicaDetails\tprint out each replica details \n"
+      + "\t-storagepolicies\tprint out storage policy summary for the blocks\n"
       + "\t-showprogress\tshow progress in output. Default is OFF (no progress)\n"
       + "\t-blockId\tprint out which file this blockId belongs to, locations"
       + " (nodes, racks) of this block, and other diagnostics info"
@@ -223,46 +228,37 @@ public class DFSck extends Configured implements Tool {
     return errCode;
   }
   
+
+  private Path getResolvedPath(String dir) throws IOException {
+    Configuration conf = getConf();
+    Path dirPath = new Path(dir);
+    FileSystem fs = dirPath.getFileSystem(conf);
+    return fs.resolvePath(dirPath);
+  }
+
   /**
    * Derive the namenode http address from the current file system,
    * either default or as set by "-fs" in the generic options.
    * @return Returns http address or null if failure.
    * @throws IOException if we can't determine the active NN address
    */
-  private URI getCurrentNamenodeAddress() throws IOException {
+  private URI getCurrentNamenodeAddress(Path target) throws IOException {
     //String nnAddress = null;
     Configuration conf = getConf();
 
     //get the filesystem object to verify it is an HDFS system
-    FileSystem fs;
-    try {
-      fs = FileSystem.get(conf);
-    } catch (IOException ioe) {
-      System.err.println("FileSystem is inaccessible due to:\n"
-          + StringUtils.stringifyException(ioe));
-      return null;
-    }
+    final FileSystem fs = target.getFileSystem(conf);
     if (!(fs instanceof DistributedFileSystem)) {
       System.err.println("FileSystem is " + fs.getUri());
       return null;
     }
-    
+
     return DFSUtil.getInfoServer(HAUtil.getAddressOfActive(fs), conf,
         DFSUtil.getHttpClientScheme(conf));
   }
 
   private int doWork(final String[] args) throws IOException {
     final StringBuilder url = new StringBuilder();
-    
-    URI namenodeAddress = getCurrentNamenodeAddress();
-    if (namenodeAddress == null) {
-      //Error message already output in {@link #getCurrentNamenodeAddress()}
-      System.err.println("DFSck exiting.");
-      return 0;
-    }
-
-    url.append(namenodeAddress.toString());
-    System.err.println("Connecting to namenode via " + url.toString());
     
     url.append("/fsck?ugi=").append(ugi.getShortUserName());
     String dir = null;
@@ -275,6 +271,10 @@ public class DFSck extends Configured implements Tool {
       else if (args[idx].equals("-blocks")) { url.append("&blocks=1"); }
       else if (args[idx].equals("-locations")) { url.append("&locations=1"); }
       else if (args[idx].equals("-racks")) { url.append("&racks=1"); }
+      else if (args[idx].equals("-replicaDetails")) {
+        url.append("&replicadetails=1");
+      }
+      else if (args[idx].equals("-storagepolicies")) { url.append("&storagepolicies=1"); }
       else if (args[idx].equals("-showprogress")) { url.append("&showprogress=1"); }
       else if (args[idx].equals("-list-corruptfileblocks")) {
         url.append("&listcorruptfileblocks=1");
@@ -309,7 +309,28 @@ public class DFSck extends Configured implements Tool {
     if (null == dir) {
       dir = "/";
     }
-    url.append("&path=").append(URLEncoder.encode(dir, "UTF-8"));
+
+    Path dirpath = null;
+    URI namenodeAddress = null;
+    try {
+      dirpath = getResolvedPath(dir);
+      namenodeAddress = getCurrentNamenodeAddress(dirpath);
+    } catch (IOException ioe) {
+      System.err.println("FileSystem is inaccessible due to:\n"
+          + StringUtils.stringifyException(ioe));
+    }
+
+    if (namenodeAddress == null) {
+      //Error message already output in {@link #getCurrentNamenodeAddress()}
+      System.err.println("DFSck exiting.");
+      return 0;
+    }
+
+    url.insert(0, namenodeAddress.toString());
+    url.append("&path=").append(URLEncoder.encode(
+        Path.getPathWithoutSchemeAndAuthority(dirpath).toString(), "UTF-8"));
+    System.err.println("Connecting to namenode via " + url.toString());
+
     if (doListCorruptFileBlocks) {
       return listCorruptFileBlocks(dir, url.toString());
     }
@@ -356,7 +377,6 @@ public class DFSck extends Configured implements Tool {
     int res = -1;
     if ((args.length == 0) || ("-files".equals(args[0]))) {
       printUsage(System.err);
-      ToolRunner.printGenericCommandUsage(System.err);
     } else if (DFSUtil.parseHelpArgument(args, USAGE, System.out, true)) {
       res = 0;
     } else {

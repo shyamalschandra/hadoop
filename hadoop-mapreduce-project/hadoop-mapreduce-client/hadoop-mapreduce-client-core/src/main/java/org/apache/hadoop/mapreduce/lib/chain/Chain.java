@@ -68,7 +68,7 @@ public class Chain {
   protected static final String REDUCER_INPUT_KEY_CLASS = 
     "mapreduce.chain.reducer.input.key.class";
   protected static final String REDUCER_INPUT_VALUE_CLASS = 
-    "maperduce.chain.reducer.input.value.class";
+    "mapreduce.chain.reducer.input.value.class";
   protected static final String REDUCER_OUTPUT_KEY_CLASS = 
     "mapreduce.chain.reducer.output.key.class";
   protected static final String REDUCER_OUTPUT_VALUE_CLASS = 
@@ -575,9 +575,8 @@ public class Chain {
   protected static Configuration getChainElementConf(Configuration jobConf,
       String confKey) {
     Configuration conf = null;
-    try {
-      Stringifier<Configuration> stringifier = 
-        new DefaultStringifier<Configuration>(jobConf, Configuration.class);
+    try (Stringifier<Configuration> stringifier =
+        new DefaultStringifier<Configuration>(jobConf, Configuration.class);) {
       String confString = jobConf.get(confKey, null);
       if (confString != null) {
         conf = stringifier.fromString(jobConf.get(confKey, null));
@@ -601,7 +600,7 @@ public class Chain {
   /**
    * Adds a Mapper class to the chain job.
    * 
-   * <p/>
+   * <p>
    * The configuration properties of the chain job have precedence over the
    * configuration properties of the Mapper.
    * 
@@ -739,7 +738,7 @@ public class Chain {
   /**
    * Sets the Reducer class to the chain job.
    * 
-   * <p/>
+   * <p>
    * The configuration properties of the chain job have precedence over the
    * configuration properties of the Reducer.
    * 

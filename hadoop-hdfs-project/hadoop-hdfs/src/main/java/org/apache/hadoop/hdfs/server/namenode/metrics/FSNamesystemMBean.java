@@ -132,6 +132,19 @@ public interface FSNamesystemMBean {
   public int getNumDecomDeadDataNodes();
 
   /**
+   * Number of failed data volumes across all live data nodes.
+   * @return number of failed data volumes across all live data nodes
+   */
+  int getVolumeFailuresTotal();
+
+  /**
+   * Returns an estimate of total capacity lost due to volume failures in bytes
+   * across all live data nodes.
+   * @return estimate of total capacity lost in bytes
+   */
+  long getEstimatedCapacityLostTotal();
+
+  /**
    * Number of data nodes that are in the decommissioning state
    */
   public int getNumDecommissioningDataNodes();
@@ -164,4 +177,35 @@ public interface FSNamesystemMBean {
    */
   public int getNumStaleStorages();
 
+  /**
+   * Returns a nested JSON object listing the top users for different RPC 
+   * operations over tracked time windows.
+   * 
+   * @return JSON string
+   */
+  public String getTopUserOpCounts();
+
+  /**
+   * Return the number of encryption zones in the system.
+   */
+  int getNumEncryptionZones();
+
+  /**
+   * Returns the length of the wait Queue for the FSNameSystemLock.
+   *
+   * A larger number here indicates lots of threads are waiting for
+   * FSNameSystemLock.
+   * @return int - Number of Threads waiting to acquire FSNameSystemLock
+   */
+  int getFsLockQueueLength();
+
+  /**
+   * Return total number of Sync Operations on FSEditLog.
+   */
+  long getTotalSyncCount();
+
+  /**
+   * Return total time spent doing sync operations on FSEditLog.
+   */
+  String getTotalSyncTimes();
 }

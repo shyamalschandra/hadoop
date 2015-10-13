@@ -19,8 +19,11 @@ package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
 import static org.junit.Assert.*;
 
+import java.io.IOException;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -345,7 +348,69 @@ public class TestQueuePlacementPolicy {
     assertEquals("root.parentq.user1",
         policy.assignAppToQueue("root.default", "user1"));
   }
-  
+
+  @Test
+  public void testUserContainsPeriod() throws Exception {
+    // This test covers the user case where the username contains periods.
+    StringBuffer sb = new StringBuffer();
+    sb.append("<queuePlacementPolicy>");
+    sb.append("  <rule name='user' />");
+    sb.append("</queuePlacementPolicy>");
+    QueuePlacementPolicy policy = parse(sb.toString());
+    assertEquals("root.first_dot_last",
+        policy.assignAppToQueue("default", "first.last"));
+
+    sb = new StringBuffer();
+    sb.append("<queuePlacementPolicy>");
+    sb.append("  <rule name='specified' create='false' />");
+    sb.append("  <rule name='nestedUserQueue'>");
+    sb.append("       <rule name='default'/>");
+    sb.append("  </rule>");
+    sb.append("  <rule name='default' />");
+    sb.append("</queuePlacementPolicy>");
+    policy = parse(sb.toString());
+    assertEquals("root.default.first_dot_last",
+        policy.assignAppToQueue("root.default", "first.last"));
+  }
+
+  @Test
+  public void testGroupContainsPeriod() throws Exception {
+    StringBuffer sb = new StringBuffer();
+    sb.append("<queuePlacementPolicy>");
+    sb.append("  <rule name='specified' create='false' />");
+    sb.append("  <rule name='nestedUserQueue'>");
+    sb.append("       <rule name='primaryGroup'/>");
+    sb.append("  </rule>");
+    sb.append("  <rule name='default' />");
+    sb.append("</queuePlacementPolicy>");
+
+    conf.setClass(CommonConfigurationKeys.HADOOP_SECURITY_GROUP_MAPPING,
+        PeriodGroupsMapping.class, GroupMappingServiceProvider.class);
+    // User queue would be created under primary group queue, and the period
+    // in the group name should be converted into _dot_
+    QueuePlacementPolicy policy = parse(sb.toString());
+    assertEquals("root.user1_dot_group.user1",
+        policy.assignAppToQueue("root.default", "user1"));
+
+    conf.setClass(CommonConfigurationKeys.HADOOP_SECURITY_GROUP_MAPPING,
+        SimpleGroupsMapping.class, GroupMappingServiceProvider.class);
+  }
+
+  @Test(expected=IOException.class)
+  public void testEmptyGroupsPrimaryGroupRule() throws Exception {
+    StringBuffer sb = new StringBuffer();
+    sb.append("<queuePlacementPolicy>");
+    sb.append("  <rule name='primaryGroup' create=\"false\" />");
+    sb.append("  <rule name='default' />");
+    sb.append("</queuePlacementPolicy>");
+
+    // Add a static mapping that returns empty groups for users
+    conf.setStrings(CommonConfigurationKeys
+        .HADOOP_USER_GROUP_STATIC_OVERRIDES, "emptygroupuser=");
+    QueuePlacementPolicy policy = parse(sb.toString());
+    policy.assignAppToQueue(null, "emptygroupuser");
+  }
+
   private QueuePlacementPolicy parse(String str) throws Exception {
     // Read and parse the allocations file.
     DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory

@@ -35,6 +35,7 @@ import org.apache.hadoop.hdfs.protocol.HdfsConstants.SafeModeAction;
 import org.apache.hadoop.hdfs.protocol.proto.JournalProtocolProtos.JournalProtocolService;
 import org.apache.hadoop.hdfs.protocolPB.JournalProtocolPB;
 import org.apache.hadoop.hdfs.protocolPB.JournalProtocolServerSideTranslatorPB;
+import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.StartupOption;
 import org.apache.hadoop.hdfs.server.common.Storage;
@@ -94,13 +95,13 @@ public class BackupNode extends NameNode {
   /////////////////////////////////////////////////////
   @Override // NameNode
   protected InetSocketAddress getRpcServerAddress(Configuration conf) {
-    String addr = conf.get(BN_ADDRESS_NAME_KEY, BN_ADDRESS_DEFAULT);
+    String addr = conf.getTrimmed(BN_ADDRESS_NAME_KEY, BN_ADDRESS_DEFAULT);
     return NetUtils.createSocketAddr(addr);
   }
   
   @Override
   protected InetSocketAddress getServiceRpcServerAddress(Configuration conf) {
-    String addr = conf.get(BN_SERVICE_RPC_ADDRESS_KEY);
+    String addr = conf.getTrimmed(BN_SERVICE_RPC_ADDRESS_KEY);
     if (addr == null || addr.isEmpty()) {
       return null;
     }
@@ -122,7 +123,7 @@ public class BackupNode extends NameNode {
   @Override // NameNode
   protected InetSocketAddress getHttpServerAddress(Configuration conf) {
     assert getNameNodeAddress() != null : "rpcAddress should be calculated first";
-    String addr = conf.get(BN_HTTP_ADDRESS_NAME_KEY, BN_HTTP_ADDRESS_DEFAULT);
+    String addr = conf.getTrimmed(BN_HTTP_ADDRESS_NAME_KEY, BN_HTTP_ADDRESS_DEFAULT);
     return NetUtils.createSocketAddr(addr);
   }
 
@@ -411,12 +412,12 @@ public class BackupNode extends NameNode {
       errorMsg = "Incompatible build versions: active name-node BV = " 
         + nsInfo.getBuildVersion() + "; backup node BV = "
         + Storage.getBuildVersion();
-      LOG.fatal(errorMsg);
+      LOG.error(errorMsg);
       throw new IOException(errorMsg);
     }
-    assert HdfsConstants.NAMENODE_LAYOUT_VERSION == nsInfo.getLayoutVersion() :
+    assert HdfsServerConstants.NAMENODE_LAYOUT_VERSION == nsInfo.getLayoutVersion() :
       "Active and backup node layout versions must be the same. Expected: "
-      + HdfsConstants.NAMENODE_LAYOUT_VERSION + " actual "+ nsInfo.getLayoutVersion();
+      + HdfsServerConstants.NAMENODE_LAYOUT_VERSION + " actual "+ nsInfo.getLayoutVersion();
     return nsInfo;
   }
 

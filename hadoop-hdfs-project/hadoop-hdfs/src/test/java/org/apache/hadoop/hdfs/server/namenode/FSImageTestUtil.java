@@ -213,7 +213,7 @@ public abstract class FSImageTestUtil {
       long firstTxId, long newInodeId) throws IOException {
     FSEditLog editLog = FSImageTestUtil.createStandaloneEditLog(editsLogDir);
     editLog.setNextTxId(firstTxId);
-    editLog.openForWrite();
+    editLog.openForWrite(NameNodeLayoutVersion.CURRENT_LAYOUT_VERSION);
     
     PermissionStatus perms = PermissionStatus.createImmutable("fakeuser", "fakegroup",
         FsPermission.createImmutable((short)0755));
@@ -554,7 +554,7 @@ public abstract class FSImageTestUtil {
    * get NameSpace quota.
    */
   public static long getNSQuota(FSNamesystem ns) {
-    return ns.dir.rootDir.getQuotaCounts().get(Quota.NAMESPACE);
+    return ns.dir.rootDir.getQuotaCounts().getNameSpace();
   }
   
   public static void assertNNFilesMatch(MiniDFSCluster cluster) throws Exception {

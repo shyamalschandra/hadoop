@@ -13,12 +13,12 @@
  */
 package org.apache.hadoop.maven.plugin.versioninfo;
 
+import java.util.Locale;
 import org.apache.hadoop.maven.plugin.util.Exec;
 import org.apache.hadoop.maven.plugin.util.FileSetUtils;
 import org.apache.maven.model.FileSet;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.MavenProject;
@@ -47,7 +47,7 @@ import java.util.TimeZone;
 @Mojo(name="version-info")
 public class VersionInfoMojo extends AbstractMojo {
 
-  @Parameter(defaultValue="${project}")
+  @Parameter(defaultValue="${project}", readonly=true)
   private MavenProject project;
 
   @Parameter(required=true)
@@ -330,7 +330,8 @@ public class VersionInfoMojo extends AbstractMojo {
       }
 
       private String normalizePath(File file) {
-        return file.getPath().toUpperCase().replaceAll("\\\\", "/");
+        return file.getPath().toUpperCase(Locale.ENGLISH)
+            .replaceAll("\\\\", "/");
       }
     });
     byte[] md5 = computeMD5(files);

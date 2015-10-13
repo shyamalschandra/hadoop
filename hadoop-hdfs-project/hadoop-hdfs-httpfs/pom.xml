@@ -132,7 +132,7 @@
         </exclusion>
         <exclusion>
           <groupId>com.amazonaws</groupId>
-          <artifactId>aws-java-sdk</artifactId>
+          <artifactId>aws-java-sdk-s3</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.eclipse.jdt</groupId>
@@ -175,7 +175,7 @@
         </exclusion>
         <exclusion>
           <groupId>com.amazonaws</groupId>
-          <artifactId>aws-java-sdk</artifactId>
+          <artifactId>aws-java-sdk-s3</artifactId>
         </exclusion>
         <exclusion>
           <groupId>org.eclipse.jdt</groupId>
@@ -192,6 +192,12 @@
     <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-hdfs</artifactId>
+      <scope>test</scope>
+      <type>test-jar</type>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-auth</artifactId>
       <scope>test</scope>
       <type>test-jar</type>
     </dependency>
@@ -319,7 +325,7 @@
             <goals>
               <goal>dependencies</goal>
             </goals>
-            <phase>site</phase>
+            <phase>package</phase>
           </execution>
         </executions>
       </plugin>
@@ -511,7 +517,7 @@
                       cd "${project.build.directory}/tomcat.exp"
                       gzip -cd ../../downloads/apache-tomcat-${tomcat.version}.tar.gz | tar xf -
                     </echo>
-                    <exec executable="sh" dir="${project.build.directory}" failonerror="true">
+                    <exec executable="${shell-executable}" dir="${project.build.directory}" failonerror="true">
                       <arg line="./tomcat-untar.sh"/>
                     </exec>
 
@@ -524,7 +530,7 @@
                     <copy file="${basedir}/src/main/tomcat/server.xml"
                           toDir="${httpfs.tomcat.dist.dir}/conf"/>
                     <delete file="${httpfs.tomcat.dist.dir}/conf/ssl-server.xml"/>
-                    <copy file="${basedir}/src/main/tomcat/ssl-server.xml"
+                    <copy file="${basedir}/src/main/tomcat/ssl-server.xml.conf"
                           toDir="${httpfs.tomcat.dist.dir}/conf"/>
                     <delete file="${httpfs.tomcat.dist.dir}/conf/logging.properties"/>
                     <copy file="${basedir}/src/main/tomcat/logging.properties"
@@ -551,7 +557,7 @@
                       cd "${project.build.directory}"
                       tar cf - ${project.artifactId}-${project.version} | gzip > ${project.artifactId}-${project.version}.tar.gz
                     </echo>
-                    <exec executable="sh" dir="${project.build.directory}" failonerror="true">
+                    <exec executable="${shell-executable}" dir="${project.build.directory}" failonerror="true">
                       <arg line="./dist-maketar.sh"/>
                     </exec>
                   </target>

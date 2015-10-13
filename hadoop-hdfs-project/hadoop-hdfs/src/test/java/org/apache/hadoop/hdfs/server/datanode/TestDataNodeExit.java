@@ -21,8 +21,10 @@ package org.apache.hadoop.hdfs.server.datanode;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -32,6 +34,7 @@ import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mockito;
 
 /** 
  * Tests if DataNode process exits if all Block Pool services exit. 
@@ -62,11 +65,11 @@ public class TestDataNodeExit {
   
   private void stopBPServiceThreads(int numStopThreads, DataNode dn)
       throws Exception {
-    BPOfferService[] bpoList = dn.getAllBpOs();
+    List<BPOfferService> bpoList = dn.getAllBpOs();
     int expected = dn.getBpOsCount() - numStopThreads;
     int index = numStopThreads - 1;
     while (index >= 0) {
-      bpoList[index--].stop();
+      bpoList.get(index--).stop();
     }
     int iterations = 3000; // Total 30 seconds MAX wait time
     while(dn.getBpOsCount() != expected && iterations > 0) {
@@ -87,5 +90,19 @@ public class TestDataNodeExit {
     assertTrue("DataNode should not exit", dn.isDatanodeUp());
     stopBPServiceThreads(2, dn);
     assertFalse("DataNode should exit", dn.isDatanodeUp());
+  }
+
+  @Test
+  public void testSendOOBToPeers() throws Exception {
+    DataNode dn = cluster.getDataNodes().get(0);
+    DataXceiverServer spyXserver = Mockito.spy(dn.getXferServer());
+    NullPointerException npe = new NullPointerException();
+    Mockito.doThrow(npe).when(spyXserver).sendOOBToPeers();
+    dn.xserver = spyXserver;
+    try {
+      dn.shutdown();
+    } catch (Exception e) {
+      fail("DataNode shutdown should not have thrown exception " + e);
+    }
   }
 }

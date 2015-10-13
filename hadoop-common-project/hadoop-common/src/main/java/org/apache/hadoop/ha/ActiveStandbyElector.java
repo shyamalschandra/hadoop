@@ -173,7 +173,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
 
   private Lock sessionReestablishLockForTests = new ReentrantLock();
   private boolean wantToBeInElection;
-  
+  private boolean monitorLockNodePending = false;
+  private ZooKeeper monitorLockNodeClient;
+
   /**
    * Create a new ActiveStandbyElector object <br/>
    * The elector is created by providing to it the Zookeeper configuration, the
@@ -256,7 +258,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     appData = new byte[data.length];
     System.arraycopy(data, 0, appData, 0, data.length);
 
-    LOG.debug("Attempting active election for " + this);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Attempting active election for " + this);
+    }
     joinElectionInternal();
   }
   
@@ -406,9 +410,11 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
   public synchronized void processResult(int rc, String path, Object ctx,
       String name) {
     if (isStaleClient(ctx)) return;
-    LOG.debug("CreateNode result: " + rc + " for path: " + path
-        + " connectionState: " + zkConnectionState +
-        "  for " + this);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("CreateNode result: " + rc + " for path: " + path
+          + " connectionState: " + zkConnectionState +
+          "  for " + this);
+    }
 
     Code code = Code.get(rc);
     if (isSuccess(code)) {
@@ -464,13 +470,15 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
   public synchronized void processResult(int rc, String path, Object ctx,
       Stat stat) {
     if (isStaleClient(ctx)) return;
-    
+    monitorLockNodePending = false;
+
     assert wantToBeInElection :
         "Got a StatNode result after quitting election";
-    
-    LOG.debug("StatNode result: " + rc + " for path: " + path
-        + " connectionState: " + zkConnectionState + " for " + this);
-        
+
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("StatNode result: " + rc + " for path: " + path
+          + " connectionState: " + zkConnectionState + " for " + this);
+    }
 
     Code code = Code.get(rc);
     if (isSuccess(code)) {
@@ -535,10 +543,12 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
   synchronized void processWatchEvent(ZooKeeper zk, WatchedEvent event) {
     Event.EventType eventType = event.getType();
     if (isStaleClient(zk)) return;
-    LOG.debug("Watcher event type: " + eventType + " with state:"
-        + event.getState() + " for path:" + event.getPath()
-        + " connectionState: " + zkConnectionState
-        + " for " + this);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Watcher event type: " + eventType + " with state:"
+          + event.getState() + " for path:" + event.getPath()
+          + " connectionState: " + zkConnectionState
+          + " for " + this);
+    }
 
     if (eventType == Event.EventType.None) {
       // the connection state has changed
@@ -597,7 +607,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
         monitorActiveStatus();
         break;
       default:
-        LOG.debug("Unexpected node event: " + eventType + " for path: " + path);
+        if (LOG.isDebugEnabled()) {
+          LOG.debug("Unexpected node event: " + eventType + " for path: " + path);
+        }
         monitorActiveStatus();
       }
 
@@ -646,7 +658,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
 
   private void monitorActiveStatus() {
     assert wantToBeInElection;
-    LOG.debug("Monitoring active leader for " + this);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Monitoring active leader for " + this);
+    }
     statRetryCount = 0;
     monitorLockNodeAsync();
   }
@@ -733,11 +747,18 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     return state;
   }
 
+  @VisibleForTesting
+  synchronized boolean isMonitorLockNodePending() {
+    return monitorLockNodePending;
+  }
+
   private boolean reEstablishSession() {
     int connectionRetryCount = 0;
     boolean success = false;
     while(!success && connectionRetryCount < maxRetryNum) {
-      LOG.debug("Establishing zookeeper connection for " + this);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Establishing zookeeper connection for " + this);
+      }
       try {
         createConnection();
         success = true;
@@ -765,7 +786,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
       watcher = null;
     }
     zkClient = getNewZooKeeper();
-    LOG.debug("Created new connection for " + this);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Created new connection for " + this);
+    }
   }
 
   @InterfaceAudience.Private
@@ -773,7 +796,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     if (zkClient == null) {
       return;
     }
-    LOG.debug("Terminating ZK connection for " + this);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Terminating ZK connection for " + this);
+    }
     ZooKeeper tempZk = zkClient;
     zkClient = null;
     watcher = null;
@@ -800,8 +825,10 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     try {
       Stat oldBreadcrumbStat = fenceOldActive();
       writeBreadCrumbNode(oldBreadcrumbStat);
-      
-      LOG.debug("Becoming active for " + this);
+
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Becoming active for " + this);
+      }
       appClient.becomeActive();
       state = State.ACTIVE;
       return true;
@@ -906,7 +933,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
 
   private void becomeStandby() {
     if (state != State.STANDBY) {
-      LOG.debug("Becoming standby for " + this);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Becoming standby for " + this);
+      }
       state = State.STANDBY;
       appClient.becomeStandby();
     }
@@ -914,7 +943,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
 
   private void enterNeutralMode() {
     if (state != State.NEUTRAL) {
-      LOG.debug("Entering neutral mode for " + this);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Entering neutral mode for " + this);
+      }
       state = State.NEUTRAL;
       appClient.enterNeutralMode();
     }
@@ -926,7 +957,13 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
   }
 
   private void monitorLockNodeAsync() {
-    zkClient.exists(zkLockFilePath, 
+    if (monitorLockNodePending && monitorLockNodeClient == zkClient) {
+      LOG.info("Ignore duplicate monitor lock-node request.");
+      return;
+    }
+    monitorLockNodePending = true;
+    monitorLockNodeClient = zkClient;
+    zkClient.exists(zkLockFilePath,
         watcher, this,
         zkClient);
   }
@@ -1064,7 +1101,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
     public void process(WatchedEvent event) {
       hasReceivedEvent.countDown();
       try {
-        hasSetZooKeeper.await(zkSessionTimeout, TimeUnit.MILLISECONDS);
+        if (!hasSetZooKeeper.await(zkSessionTimeout, TimeUnit.MILLISECONDS)) {
+          LOG.debug("Event received with stale zk");
+        }
         ActiveStandbyElector.this.processWatchEvent(
             zk, event);
       } catch (Throwable t) {
@@ -1101,5 +1140,9 @@ public class ActiveStandbyElector implements StatCallback, StringCallback {
       " appData=" +
       ((appData == null) ? "null" : StringUtils.byteToHexString(appData)) + 
       " cb=" + appClient;
+  }
+
+  public String getHAZookeeperConnectionState() {
+    return this.zkConnectionState.name();
   }
 }

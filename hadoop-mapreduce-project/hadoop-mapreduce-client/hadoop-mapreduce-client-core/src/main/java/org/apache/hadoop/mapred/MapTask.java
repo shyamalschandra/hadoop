@@ -387,6 +387,7 @@ public class MapTask extends Task {
     Class<?>[] collectorClasses = job.getClasses(
       JobContext.MAP_OUTPUT_COLLECTOR_CLASS_ATTR, MapOutputBuffer.class);
     int remainingCollectors = collectorClasses.length;
+    Exception lastException = null;
     for (Class clazz : collectorClasses) {
       try {
         if (!MapOutputCollector.class.isAssignableFrom(clazz)) {
@@ -406,10 +407,12 @@ public class MapTask extends Task {
         if (--remainingCollectors > 0) {
           msg += " (" + remainingCollectors + " more collector(s) to try)";
         }
+        lastException = e;
         LOG.warn(msg, e);
       }
     }
-    throw new IOException("Unable to initialize any output collector");
+    throw new IOException("Initialization of all the collectors failed. " +
+      "Error in last collector was :" + lastException.getMessage(), lastException);
   }
 
   @SuppressWarnings("unchecked")
@@ -975,8 +978,9 @@ public class MapTask extends Task {
         throw new IOException(
             "Invalid \"" + JobContext.IO_SORT_MB + "\": " + sortmb);
       }
-      sorter = ReflectionUtils.newInstance(job.getClass("map.sort.class",
-            QuickSort.class, IndexedSorter.class), job);
+      sorter = ReflectionUtils.newInstance(job.getClass(
+                   MRJobConfig.MAP_SORT_CLASS, QuickSort.class,
+                   IndexedSorter.class), job);
       // buffers and accounting
       int maxMemUsage = sortmb << 20;
       maxMemUsage -= maxMemUsage % METASIZE;
@@ -1252,6 +1256,7 @@ public class MapTask extends Task {
      * Compare by partition, then by key.
      * @see IndexedSortable#compare
      */
+    @Override
     public int compare(final int mi, final int mj) {
       final int kvi = offsetFor(mi % maxRec);
       final int kvj = offsetFor(mj % maxRec);
@@ -1275,6 +1280,7 @@ public class MapTask extends Task {
      * Swap metadata for items i, j
      * @see IndexedSortable#swap
      */
+    @Override
     public void swap(final int mi, final int mj) {
       int iOff = (mi % maxRec) * METASIZE;
       int jOff = (mj % maxRec) * METASIZE;
@@ -1455,6 +1461,10 @@ public class MapTask extends Task {
     public void flush() throws IOException, ClassNotFoundException,
            InterruptedException {
       LOG.info("Starting flush of map output");
+      if (kvbuffer == null) {
+        LOG.info("kvbuffer is null. Skipping flush.");
+        return;
+      }
       spillLock.lock();
       try {
         while (spillInProgress) {

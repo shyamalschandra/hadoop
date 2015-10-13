@@ -165,6 +165,12 @@ DWORD JunctionPointCheck(__in LPCWSTR pathName, __out LPBOOL result);
 
 DWORD ChangeFileModeByMask(__in LPCWSTR path, INT mode);
 
+DWORD CreateDirectoryWithMode(__in LPCWSTR path, __in INT mode);
+
+DWORD CreateFileWithMode(__in LPCWSTR lpPath, __in DWORD dwDesiredAccess,
+    __in DWORD dwShareMode, __in DWORD dwCreationDisposition, __in INT mode,
+    __out_opt PHANDLE pHFile);
+
 DWORD GetLocalGroupsForUser(__in LPCWSTR user,
   __out LPLOCALGROUP_USERS_INFO_0 *groups, __out LPDWORD entries);
 
@@ -243,7 +249,8 @@ DWORD BuildServiceSecurityDescriptor(
 
 DWORD AddNodeManagerAndUserACEsToObject(
   __in HANDLE hProcess,
-  __in LPWSTR user);
+  __in LPCWSTR user,
+  __in ACCESS_MASK accessMask);
 
 
 DWORD GetSecureJobObjectName(
@@ -276,14 +283,28 @@ DWORD RpcCall_WinutilsCreateFile(
   __out HANDLE* hFile);
 
 DWORD RpcCall_WinutilsMoveFile(
-  __in LPCWSTR    sourcePath, 
-  __in LPCWSTR    destinationPath,
-  __in BOOL       replaceExisting);
+  __in int operation,
+  __in LPCWSTR sourcePath, 
+  __in LPCWSTR destinationPath,
+  __in BOOL replaceExisting);
+
 
 DWORD RpcCall_WinutilsDeletePath(
   __in LPCWSTR    path,
   __in BOOL       isDir,
   __out BOOL*     pDeleted);
+
+DWORD RpcCall_WinutilsChown(
+  __in LPCWSTR filePath, 
+  __in_opt LPCWSTR ownerName, 
+  __in_opt LPCWSTR groupName);
+
+DWORD RpcCall_WinutilsMkDir(
+  __in LPCWSTR filePath);
+
+DWORD RpcCall_WinutilsChmod(
+  __in LPCWSTR filePath, 
+  __in int mode);
 
 #ifdef __cplusplus
 }

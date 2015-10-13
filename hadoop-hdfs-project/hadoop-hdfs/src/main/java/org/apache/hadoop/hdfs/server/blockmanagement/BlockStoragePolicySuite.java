@@ -21,11 +21,12 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.XAttr;
-import org.apache.hadoop.hdfs.StorageType;
 import org.apache.hadoop.hdfs.XAttrHelper;
 import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,7 +42,6 @@ public class BlockStoragePolicySuite {
   public static final XAttr.NameSpace XAttrNS = XAttr.NameSpace.SYSTEM;
 
   public static final int ID_BIT_LENGTH = 4;
-  public static final byte ID_UNSPECIFIED = 0;
 
   @VisibleForTesting
   public static BlockStoragePolicySuite createDefaultSuite() {
@@ -131,7 +131,8 @@ public class BlockStoragePolicySuite {
   }
 
   public static String buildXAttrName() {
-    return XAttrNS.toString().toLowerCase() + "." + STORAGE_POLICY_XATTR_NAME;
+    return StringUtils.toLowerCase(XAttrNS.toString())
+        + "." + STORAGE_POLICY_XATTR_NAME;
   }
 
   public static XAttr buildXAttr(byte policyId) {
@@ -139,8 +140,7 @@ public class BlockStoragePolicySuite {
     return XAttrHelper.buildXAttr(name, new byte[]{policyId});
   }
 
-  public static boolean isStoragePolicyXAttr(XAttr xattr) {
-    return xattr != null && xattr.getNameSpace() == XAttrNS
-        && xattr.getName().equals(STORAGE_POLICY_XATTR_NAME);
+  public static String getStoragePolicyXAttrPrefixedName() {
+    return XAttrHelper.getPrefixedName(XAttrNS, STORAGE_POLICY_XATTR_NAME);
   }
 }

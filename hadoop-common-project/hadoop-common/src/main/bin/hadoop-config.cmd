@@ -65,7 +65,9 @@ if not exist %HADOOP_HOME%\share\hadoop\common\hadoop-common-*.jar (
     exit /b 1
 )
 
-set HADOOP_CONF_DIR=%HADOOP_HOME%\etc\hadoop
+if not defined HADOOP_CONF_DIR (
+  set HADOOP_CONF_DIR=%HADOOP_HOME%\etc\hadoop
+)
 
 @rem
 @rem Allow alternate conf dir location.
@@ -113,7 +115,7 @@ if not defined JAVA_HOME (
 
 if not exist %JAVA_HOME%\bin\java.exe (
   echo Error: JAVA_HOME is incorrectly set.
-  echo        Please update %HADOOP_HOME%\conf\hadoop-env.cmd
+  echo        Please update %HADOOP_CONF_DIR%\hadoop-env.cmd
   goto :eof
 )
 

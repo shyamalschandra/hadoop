@@ -45,7 +45,9 @@ import org.apache.curator.framework.recipes.cache.PathChildrenCache.StartMode;
 import org.apache.curator.framework.recipes.cache.PathChildrenCacheEvent;
 import org.apache.curator.framework.recipes.cache.PathChildrenCacheListener;
 import org.apache.curator.framework.recipes.shared.SharedCount;
+import org.apache.curator.framework.recipes.shared.VersionedValue;
 import org.apache.curator.retry.RetryNTimes;
+import org.apache.curator.utils.EnsurePath;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
@@ -54,11 +56,11 @@ import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.delegation.web.DelegationTokenManager;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.KeeperException.NoNodeException;
 import org.apache.zookeeper.ZooDefs.Perms;
 import org.apache.zookeeper.client.ZooKeeperSaslClient;
 import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Id;
-import org.apache.zookeeper.data.Stat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -109,10 +111,10 @@ public abstract class ZKDelegationTokenSecretManager<TokenIdent extends Abstract
       "ZKDelegationTokenSecretManagerClient";
 
   private static final String ZK_DTSM_NAMESPACE = "ZKDTSMRoot";
-  private static final String ZK_DTSM_SEQNUM_ROOT = "ZKDTSMSeqNumRoot";
-  private static final String ZK_DTSM_KEYID_ROOT = "ZKDTSMKeyIdRoot";
-  private static final String ZK_DTSM_TOKENS_ROOT = "ZKDTSMTokensRoot";
-  private static final String ZK_DTSM_MASTER_KEY_ROOT = "ZKDTSMMasterKeyRoot";
+  private static final String ZK_DTSM_SEQNUM_ROOT = "/ZKDTSMSeqNumRoot";
+  private static final String ZK_DTSM_KEYID_ROOT = "/ZKDTSMKeyIdRoot";
+  private static final String ZK_DTSM_TOKENS_ROOT = "/ZKDTSMTokensRoot";
+  private static final String ZK_DTSM_MASTER_KEY_ROOT = "/ZKDTSMMasterKeyRoot";
 
   private static final String DELEGATION_KEY_PREFIX = "DK_";
   private static final String DELEGATION_TOKEN_PREFIX = "DT_";
@@ -296,6 +298,17 @@ public abstract class ZKDelegationTokenSecretManager<TokenIdent extends Abstract
         zkClient.start();
       } catch (Exception e) {
         throw new IOException("Could not start Curator Framework", e);
+      }
+    } else {
+      // If namespace parents are implicitly created, they won't have ACLs.
+      // So, let's explicitly create them.
+      CuratorFramework nullNsFw = zkClient.usingNamespace(null);
+      EnsurePath ensureNs =
+        nullNsFw.newNamespaceAwareEnsurePath("/" + zkClient.getNamespace());
+      try {
+        ensureNs.ensure(nullNsFw.getZookeeperClient());
+      } catch (Exception e) {
+        throw new IOException("Could not create namespace", e);
       }
     }
     listenerThreadPool = Executors.newSingleThreadExecutor();
@@ -505,11 +518,20 @@ public abstract class ZKDelegationTokenSecretManager<TokenIdent extends Abstract
     return delTokSeqCounter.getCount();
   }
 
+  private void incrSharedCount(SharedCount sharedCount) throws Exception {
+    while (true) {
+      // Loop until we successfully increment the counter
+      VersionedValue<Integer> versionedValue = sharedCount.getVersionedValue();
+      if (sharedCount.trySetCount(versionedValue, versionedValue.getValue() + 1)) {
+        break;
+      }
+    }
+  }
+
   @Override
   protected int incrementDelegationTokenSeqNum() {
     try {
-      while (!delTokSeqCounter.trySetCount(delTokSeqCounter.getCount() + 1)) {
-      }
+      incrSharedCount(delTokSeqCounter);
     } catch (InterruptedException e) {
       // The ExpirationThread is just finishing.. so dont do anything..
       LOG.debug("Thread interrupted while performing token counter increment", e);
@@ -537,8 +559,7 @@ public abstract class ZKDelegationTokenSecretManager<TokenIdent extends Abstract
   @Override
   protected int incrementCurrentKeyId() {
     try {
-      while (!keyIdSeqCounter.trySetCount(keyIdSeqCounter.getCount() + 1)) {
-      }
+      incrSharedCount(keyIdSeqCounter);
     } catch (InterruptedException e) {
       // The ExpirationThread is just finishing.. so dont do anything..
       LOG.debug("Thread interrupted while performing keyId increment", e);
@@ -701,7 +722,15 @@ public abstract class ZKDelegationTokenSecretManager<TokenIdent extends Abstract
     try {
       if (zkClient.checkExists().forPath(nodeRemovePath) != null) {
         while(zkClient.checkExists().forPath(nodeRemovePath) != null){
-          zkClient.delete().guaranteed().forPath(nodeRemovePath);
+          try {
+            zkClient.delete().guaranteed().forPath(nodeRemovePath);
+          } catch (NoNodeException nne) {
+            // It is possible that the node might be deleted between the
+            // check and the actual delete.. which might lead to an
+            // exception that can bring down the daemon running this
+            // SecretManager
+            LOG.debug("Node already deleted by peer " + nodeRemovePath);
+          }
         }
       } else {
         LOG.debug("Attempted to delete a non-existing znode " + nodeRemovePath);
@@ -753,7 +782,15 @@ public abstract class ZKDelegationTokenSecretManager<TokenIdent extends Abstract
     try {
       if (zkClient.checkExists().forPath(nodeRemovePath) != null) {
         while(zkClient.checkExists().forPath(nodeRemovePath) != null){
-          zkClient.delete().guaranteed().forPath(nodeRemovePath);
+          try {
+            zkClient.delete().guaranteed().forPath(nodeRemovePath);
+          } catch (NoNodeException nne) {
+            // It is possible that the node might be deleted between the
+            // check and the actual delete.. which might lead to an
+            // exception that can bring down the daemon running this
+            // SecretManager
+            LOG.debug("Node already deleted by peer " + nodeRemovePath);
+          }
         }
       } else {
         LOG.debug("Attempted to remove a non-existing znode " + nodeRemovePath);

@@ -18,10 +18,12 @@
 
 package org.apache.hadoop.util;
 
+import java.util.Locale;
 import static org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix.long2String;
 import static org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix.string2long;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -35,6 +37,7 @@ import java.util.regex.Pattern;
 
 import org.apache.hadoop.test.UnitTestcaseTimeLimit;
 import org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix;
+import org.junit.Assume;
 import org.junit.Test;
 
 public class TestStringUtils extends UnitTestcaseTimeLimit {
@@ -275,8 +278,12 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     s.add("c");
     assertEquals("", StringUtils.join(":", s.subList(0, 0)));
     assertEquals("a", StringUtils.join(":", s.subList(0, 1)));
+    assertEquals("", StringUtils.join(':', s.subList(0, 0)));
+    assertEquals("a", StringUtils.join(':', s.subList(0, 1)));
     assertEquals("a:b", StringUtils.join(":", s.subList(0, 2)));
     assertEquals("a:b:c", StringUtils.join(":", s.subList(0, 3)));
+    assertEquals("a:b", StringUtils.join(':', s.subList(0, 2)));
+    assertEquals("a:b:c", StringUtils.join(':', s.subList(0, 3)));
   }
   
   @Test (timeout = 30000)
@@ -410,6 +417,25 @@ public class TestStringUtils extends UnitTestcaseTimeLimit {
     Collection<String> col = StringUtils.getTrimmedStringCollection(TO_SPLIT);
     assertEquals(4, col.size());
     assertTrue(col.containsAll(Arrays.asList(new String[]{"foo","bar","baz","blah"})));
+  }
+
+  @Test
+  public void testLowerAndUpperStrings() {
+    Locale defaultLocale = Locale.getDefault();
+    try {
+      Locale.setDefault(new Locale("tr", "TR"));
+      String upperStr = "TITLE";
+      String lowerStr = "title";
+      // Confirming TR locale.
+      assertNotEquals(lowerStr, upperStr.toLowerCase());
+      assertNotEquals(upperStr, lowerStr.toUpperCase());
+      // This should be true regardless of locale.
+      assertEquals(lowerStr, StringUtils.toLowerCase(upperStr));
+      assertEquals(upperStr, StringUtils.toUpperCase(lowerStr));
+      assertTrue(StringUtils.equalsIgnoreCase(upperStr, lowerStr));
+    } finally {
+      Locale.setDefault(defaultLocale);
+    }
   }
 
   // Benchmark for StringUtils split

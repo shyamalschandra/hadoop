@@ -36,6 +36,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
+import com.google.common.annotations.VisibleForTesting;
+
 /**
  * Provides access to the <code>AccessControlList</code>s used by KMS,
  * hot-reloading them if the <code>kms-acls.xml</code> file where the ACLs
@@ -70,8 +72,11 @@ public class KMSACLs implements Runnable, KeyACLs {
 
   private volatile Map<Type, AccessControlList> acls;
   private volatile Map<Type, AccessControlList> blacklistedAcls;
-  private volatile Map<String, HashMap<KeyOpType, AccessControlList>> keyAcls;
+  @VisibleForTesting
+  volatile Map<String, HashMap<KeyOpType, AccessControlList>> keyAcls;
   private final Map<KeyOpType, AccessControlList> defaultKeyAcls =
+      new HashMap<KeyOpType, AccessControlList>();
+  private final Map<KeyOpType, AccessControlList> whitelistKeyAcls =
       new HashMap<KeyOpType, AccessControlList>();
   private ScheduledExecutorService executorService;
   private long lastReload;
@@ -110,7 +115,7 @@ public class KMSACLs implements Runnable, KeyACLs {
     Map<String, HashMap<KeyOpType, AccessControlList>> tempKeyAcls =
         new HashMap<String, HashMap<KeyOpType,AccessControlList>>();
     Map<String, String> allKeyACLS =
-        conf.getValByRegex(Pattern.quote(KMSConfiguration.KEY_ACL_PREFIX));
+        conf.getValByRegex(KMSConfiguration.KEY_ACL_PREFIX_REGEX);
     for (Map.Entry<String, String> keyAcl : allKeyACLS.entrySet()) {
       String k = keyAcl.getKey();
       // this should be of type "key.acl.<KEY_NAME>.<OP_TYPE>"
@@ -150,10 +155,30 @@ public class KMSACLs implements Runnable, KeyACLs {
         String confKey = KMSConfiguration.DEFAULT_KEY_ACL_PREFIX + keyOp;
         String aclStr = conf.get(confKey);
         if (aclStr != null) {
-          if (aclStr.equals("*")) {
-            LOG.info("Default Key ACL for  KEY_OP '{}' is set to '*'", keyOp);
+          if (keyOp == KeyOpType.ALL) {
+            // Ignore All operation for default key acl
+            LOG.warn("Should not configure default key ACL for KEY_OP '{}'", keyOp);
+          } else {
+            if (aclStr.equals("*")) {
+              LOG.info("Default Key ACL for KEY_OP '{}' is set to '*'", keyOp);
+            }
+            defaultKeyAcls.put(keyOp, new AccessControlList(aclStr));
           }
-          defaultKeyAcls.put(keyOp, new AccessControlList(aclStr));
+        }
+      }
+      if (!whitelistKeyAcls.containsKey(keyOp)) {
+        String confKey = KMSConfiguration.WHITELIST_KEY_ACL_PREFIX + keyOp;
+        String aclStr = conf.get(confKey);
+        if (aclStr != null) {
+          if (keyOp == KeyOpType.ALL) {
+            // Ignore All operation for whitelist key acl
+            LOG.warn("Should not configure whitelist key ACL for KEY_OP '{}'", keyOp);
+          } else {
+            if (aclStr.equals("*")) {
+              LOG.info("Whitelist Key ACL for KEY_OP '{}' is set to '*'", keyOp);
+            }
+            whitelistKeyAcls.put(keyOp, new AccessControlList(aclStr));
+          }
         }
       }
     }
@@ -229,13 +254,23 @@ public class KMSACLs implements Runnable, KeyACLs {
   @Override
   public boolean hasAccessToKey(String keyName, UserGroupInformation ugi,
       KeyOpType opType) {
+    return checkKeyAccess(keyName, ugi, opType)
+        || checkKeyAccess(whitelistKeyAcls, ugi, opType);
+  }
+
+  private boolean checkKeyAccess(String keyName, UserGroupInformation ugi,
+      KeyOpType opType) {
     Map<KeyOpType, AccessControlList> keyAcl = keyAcls.get(keyName);
     if (keyAcl == null) {
-      // Get KeyAcl map of DEFAULT KEY.
+      // If No key acl defined for this key, check to see if
+      // there are key defaults configured for this operation
       keyAcl = defaultKeyAcls;
     }
-    // If No key acl defined for this key, check to see if
-    // there are key defaults configured for this operation
+    return checkKeyAccess(keyAcl, ugi, opType);
+  }
+
+  private boolean checkKeyAccess(Map<KeyOpType, AccessControlList> keyAcl,
+      UserGroupInformation ugi, KeyOpType opType) {
     AccessControlList acl = keyAcl.get(opType);
     if (acl == null) {
       // If no acl is specified for this operation,
@@ -246,9 +281,12 @@ public class KMSACLs implements Runnable, KeyACLs {
     }
   }
 
+
   @Override
   public boolean isACLPresent(String keyName, KeyOpType opType) {
-    return (keyAcls.containsKey(keyName) || defaultKeyAcls.containsKey(opType));
+    return (keyAcls.containsKey(keyName)
+        || defaultKeyAcls.containsKey(opType)
+        || whitelistKeyAcls.containsKey(opType));
   }
 
 }

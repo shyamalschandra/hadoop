@@ -33,7 +33,7 @@ import java.security.Principal;
 
 /**
  * Filter that sets request contextual information for the slf4j MDC.
- * <p/>
+ * <p>
  * It sets the following values:
  * <ul>
  * <li>hostname: if the {@link HostnameFilter} is present and configured
@@ -48,7 +48,7 @@ public class MDCFilter implements Filter {
 
   /**
    * Initializes the filter.
-   * <p/>
+   * <p>
    * This implementation is a NOP.
    *
    * @param config filter configuration.
@@ -66,8 +66,8 @@ public class MDCFilter implements Filter {
    * @param response servlet response.
    * @param chain filter chain.
    *
-   * @throws IOException thrown if an IO error occurrs.
-   * @throws ServletException thrown if a servet error occurrs.
+   * @throws IOException thrown if an IO error occurs.
+   * @throws ServletException thrown if a servlet error occurs.
    */
   @Override
   public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
@@ -93,7 +93,7 @@ public class MDCFilter implements Filter {
 
   /**
    * Destroys the filter.
-   * <p/>
+   * <p>
    * This implementation is a NOP.
    */
   @Override

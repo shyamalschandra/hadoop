@@ -31,8 +31,7 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 
 /** Names a file or directory in a {@link FileSystem}.
- * Path strings use slash as the directory separator.  A path string is
- * absolute if it begins with a slash.
+ * Path strings use slash as the directory separator.
  */
 @Stringable
 @InterfaceAudience.Public
@@ -60,7 +59,6 @@ public class Path implements Comparable {
 
   /**
    * Pathnames with scheme and relative path are illegal.
-   * @param path to be checked
    */
   void checkNotSchemeWithRelative() {
     if (toUri().isAbsolute() && !isUriPathAbsolute()) {
@@ -313,14 +311,7 @@ public class Path implements Comparable {
     return uri.getPath().startsWith(SEPARATOR, start);
    }
   
-  /** True if the path component of this URI is absolute. */
-  /**
-   * There is some ambiguity here. An absolute path is a slash
-   * relative name without a scheme or an authority.
-   * So either this method was incorrectly named or its
-   * implementation is incorrect. This method returns true
-   * even if there is a scheme and authority.
-   */
+  /** True if the path is not a relative path and starts with root. */
   public boolean isAbsolute() {
      return isUriPathAbsolute();
   }

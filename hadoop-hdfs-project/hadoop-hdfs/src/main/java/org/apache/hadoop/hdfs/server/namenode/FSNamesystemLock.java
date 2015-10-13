@@ -34,24 +34,6 @@ class FSNamesystemLock implements ReadWriteLock {
   @VisibleForTesting
   protected ReentrantReadWriteLock coarseLock;
   
-  /**
-   * When locking the FSNS for a read that may take a long time, we take this
-   * lock before taking the regular FSNS read lock. All writers also take this
-   * lock before taking the FSNS write lock. Regular (short) readers do not
-   * take this lock at all, instead relying solely on the synchronization of the
-   * regular FSNS lock.
-   * 
-   * This scheme ensures that:
-   * 1) In the case of normal (fast) ops, readers proceed concurrently and
-   *    writers are not starved.
-   * 2) In the case of long read ops, short reads are allowed to proceed
-   *    concurrently during the duration of the long read.
-   * 
-   * See HDFS-5064 for more context.
-   */
-  @VisibleForTesting
-  protected final ReentrantLock longReadLock = new ReentrantLock(true);
-  
   FSNamesystemLock(boolean fair) {
     this.coarseLock = new ReentrantReadWriteLock(fair);
   }
@@ -66,10 +48,6 @@ class FSNamesystemLock implements ReadWriteLock {
     return coarseLock.writeLock();
   }
 
-  public Lock longReadLock() {
-    return longReadLock;
-  }
-  
   public int getReadHoldCount() {
     return coarseLock.getReadHoldCount();
   }
@@ -80,5 +58,16 @@ class FSNamesystemLock implements ReadWriteLock {
   
   public boolean isWriteLockedByCurrentThread() {
     return coarseLock.isWriteLockedByCurrentThread();
+  }
+
+  /**
+   * Returns the QueueLength of waiting threads.
+   *
+   * A larger number indicates greater lock contention.
+   *
+   * @return int - Number of threads waiting on this lock
+   */
+  public int getQueueLength() {
+    return coarseLock.getQueueLength();
   }
 }

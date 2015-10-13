@@ -32,7 +32,9 @@ import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSCluster.DataNodeProperties;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockManager;
 import org.apache.hadoop.hdfs.server.blockmanagement.NumberReplicas;
+import org.apache.hadoop.hdfs.server.datanode.DataNodeTestUtils;
 import org.junit.Test;
 
 public class TestProcessCorruptBlocks {
@@ -259,7 +261,9 @@ public class TestProcessCorruptBlocks {
   }
 
   private static NumberReplicas countReplicas(final FSNamesystem namesystem, ExtendedBlock block) {
-    return namesystem.getBlockManager().countNodes(block.getLocalBlock());
+    final BlockManager blockManager = namesystem.getBlockManager();
+    return blockManager.countNodes(blockManager.getStoredBlock(
+        block.getLocalBlock()));
   }
 
   private void corruptBlock(MiniDFSCluster cluster, FileSystem fs, final Path fileName,
@@ -267,14 +271,16 @@ public class TestProcessCorruptBlocks {
     // corrupt the block on datanode dnIndex
     // the indexes change once the nodes are restarted.
     // But the datadirectory will not change
-    assertTrue(MiniDFSCluster.corruptReplica(dnIndex, block));
+    assertTrue(cluster.corruptReplica(dnIndex, block));
 
+    // Run directory scanner to update the DN's volume map  
+    DataNodeTestUtils.runDirectoryScanner(cluster.getDataNodes().get(0));
     DataNodeProperties dnProps = cluster.stopDataNode(0);
 
     // Each datanode has multiple data dirs, check each
     for (int dirIndex = 0; dirIndex < 2; dirIndex++) {
       final String bpid = cluster.getNamesystem().getBlockPoolId();
-      File storageDir = MiniDFSCluster.getStorageDir(dnIndex, dirIndex);
+      File storageDir = cluster.getStorageDir(dnIndex, dirIndex);
       File dataDir = MiniDFSCluster.getFinalizedDir(storageDir, bpid);
       File scanLogFile = new File(dataDir, "dncp_block_verification.log.curr");
       if (scanLogFile.exists()) {

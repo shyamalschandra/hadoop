@@ -33,6 +33,7 @@ import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.FilterParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.GroupParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.LenParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.ModifiedTimeParam;
+import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.NewLengthParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OffsetParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OperationParam;
 import org.apache.hadoop.fs.http.server.HttpFSParametersProvider.OverwriteParam;
@@ -85,7 +86,7 @@ import java.util.Map;
 
 /**
  * Main class of HttpFSServer server.
- * <p/>
+ * <p>
  * The <code>HttpFSServer</code> class uses Jersey JAX-RS to binds HTTP requests to the
  * different operations.
  */
@@ -103,7 +104,7 @@ public class HttpFSServer {
    *
    * @return FileSystemExecutor response
    *
-   * @throws IOException thrown if an IO error occurrs.
+   * @throws IOException thrown if an IO error occurs.
    * @throws FileSystemAccessException thrown if a FileSystemAccess releated error occurred. Thrown
    * exceptions are handled by {@link HttpFSExceptionProvider}.
    */
@@ -117,7 +118,7 @@ public class HttpFSServer {
   /**
    * Returns a filesystem instance. The fileystem instance is wired for release at the completion of
    * the current Servlet request via the {@link FileSystemReleaseFilter}.
-   * <p/>
+   * <p>
    * If a do-as user is specified, the current user must be a valid proxyuser, otherwise an
    * <code>AccessControlException</code> will be thrown.
    *
@@ -425,6 +426,15 @@ public class HttpFSServer {
         AUDIT_LOG.info("[{}]", path);
         System.out.println("SENT RESPONSE");
         response = Response.ok().build();
+        break;
+      }
+      case TRUNCATE: {
+        Long newLength = params.get(NewLengthParam.NAME, NewLengthParam.class);
+        FSOperations.FSTruncate command = 
+            new FSOperations.FSTruncate(path, newLength);
+        JSONObject json = fsExecute(user, command);
+        AUDIT_LOG.info("Truncate [{}] to length [{}]", path, newLength);
+        response = Response.ok(json).type(MediaType.APPLICATION_JSON).build();
         break;
       }
       default: {

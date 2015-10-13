@@ -27,10 +27,12 @@ import org.apache.hadoop.yarn.api.protocolrecords.StartContainerRequest;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.proto.YarnProtos.LocalResourceProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.ContainerManagerApplicationProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.DeletionServiceDeleteTaskProto;
 import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LocalizedResourceProto;
+import org.apache.hadoop.yarn.proto.YarnServerNodemanagerRecoveryProtos.LogDeleterProto;
 import org.apache.hadoop.yarn.server.api.records.MasterKey;
 
 // The state store to use when state isn't being stored
@@ -84,6 +86,11 @@ public class NMNullStateStoreService extends NMStateStoreService {
   @Override
   public void storeContainerLaunched(ContainerId containerId)
       throws IOException {
+  }
+
+  @Override
+  public void storeContainerResourceChanged(ContainerId containerId,
+      Resource capability) throws IOException {
   }
 
   @Override
@@ -189,6 +196,21 @@ public class NMNullStateStoreService extends NMStateStoreService {
   @Override
   public void removeContainerToken(ContainerId containerId)
       throws IOException {
+  }
+
+  @Override
+  public RecoveredLogDeleterState loadLogDeleterState() throws IOException {
+    throw new UnsupportedOperationException(
+        "Recovery not supported by this state store");
+  }
+
+  @Override
+  public void storeLogDeleter(ApplicationId appId, LogDeleterProto proto)
+      throws IOException {
+  }
+
+  @Override
+  public void removeLogDeleter(ApplicationId appId) throws IOException {
   }
 
   @Override

@@ -93,7 +93,6 @@ public class ApplicationACLsManager {
    * @param applicationAccessType
    * @param applicationOwner
    * @param applicationId
-   * @throws AccessControlException
    */
   public boolean checkAccess(UserGroupInformation callerUGI,
       ApplicationAccessType applicationAccessType, String applicationOwner,
@@ -138,5 +137,16 @@ public class ApplicationACLsManager {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Check if the given user in an admin.
+   *
+   * @param calledUGI
+   *          UserGroupInformation for the user
+   * @return true if the user is an admin, false otherwise
+   */
+  public final boolean isAdmin(final UserGroupInformation calledUGI) {
+    return this.adminAclsManager.isAdmin(calledUGI);
   }
 }

@@ -35,12 +35,17 @@ import org.apache.hadoop.mapreduce.SleepJob;
 import org.apache.hadoop.util.ProgramDriver;
 
 import org.apache.hadoop.hdfs.NNBench;
+import org.apache.hadoop.hdfs.NNBenchWithoutMR;
 import org.apache.hadoop.fs.TestFileSystem;
 import org.apache.hadoop.fs.TestDFSIO;
 import org.apache.hadoop.fs.DFSCIOTest;
 import org.apache.hadoop.fs.DistributedFSCheck;
 import org.apache.hadoop.io.FileBench;
 import org.apache.hadoop.fs.JHLogAnalyzer;
+import org.apache.hadoop.fs.loadGenerator.DataGenerator;
+import org.apache.hadoop.fs.loadGenerator.LoadGenerator;
+import org.apache.hadoop.fs.loadGenerator.LoadGeneratorMR;
+import org.apache.hadoop.fs.loadGenerator.StructureGenerator;
 import org.apache.hadoop.fs.slive.SliveTest;
 
 /**
@@ -86,7 +91,9 @@ public class MapredTestDriver {
       pgd.addClass("sleep", SleepJob.class, 
                    "A job that sleeps at each map and reduce task.");
       pgd.addClass("nnbench", NNBench.class, 
-          "A benchmark that stresses the namenode.");
+          "A benchmark that stresses the namenode w/ MR.");
+      pgd.addClass("nnbenchWithoutMR", NNBenchWithoutMR.class,
+          "A benchmark that stresses the namenode w/o MR.");
       pgd.addClass("testfilesystem", TestFileSystem.class, 
           "A test for FileSystem read/write.");
       pgd.addClass(TestDFSIO.class.getSimpleName(), TestDFSIO.class, 
@@ -107,6 +114,14 @@ public class MapredTestDriver {
       "Single process HDFS and MR cluster.");
       pgd.addClass("largesorter", LargeSorter.class,
           "Large-Sort tester");
+      pgd.addClass("NNloadGenerator", LoadGenerator.class,
+              "Generate load on Namenode using NN loadgenerator run WITHOUT MR");
+      pgd.addClass("NNloadGeneratorMR", LoadGeneratorMR.class,
+          "Generate load on Namenode using NN loadgenerator run as MR job");
+      pgd.addClass("NNstructureGenerator", StructureGenerator.class,
+          "Generate the structure to be used by NNdataGenerator");
+      pgd.addClass("NNdataGenerator", DataGenerator.class,
+          "Generate the data to be used by NNloadGenerator");
     } catch(Throwable e) {
       e.printStackTrace();
     }

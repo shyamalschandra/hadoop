@@ -39,12 +39,9 @@ public class ReservationQueue extends LeafQueue {
 
   private PlanQueue parent;
 
-  private int maxSystemApps;
-
   public ReservationQueue(CapacitySchedulerContext cs, String queueName,
       PlanQueue parent) throws IOException {
     super(cs, queueName, parent, null);
-    maxSystemApps = cs.getConfiguration().getMaximumSystemApplications();
     // the following parameters are common to all reservation in the plan
     updateQuotas(parent.getUserLimitForReservation(),
         parent.getUserLimitFactor(),
@@ -62,11 +59,10 @@ public class ReservationQueue extends LeafQueue {
       throw new IOException("Trying to reinitialize " + getQueuePath()
           + " from " + newlyParsedQueue.getQueuePath());
     }
-    CSQueueUtils.updateQueueStatistics(
-        parent.schedulerContext.getResourceCalculator(), newlyParsedQueue,
-        parent, parent.schedulerContext.getClusterResource(),
-        parent.schedulerContext.getMinimumResourceCapability());
     super.reinitialize(newlyParsedQueue, clusterResource);
+    CSQueueUtils.updateQueueStatistics(resourceCalculator, clusterResource,
+        minimumAllocation, this, labelManager, null);
+
     updateQuotas(parent.getUserLimitForReservation(),
         parent.getUserLimitFactor(),
         parent.getMaxApplicationsForReservations(),
@@ -90,7 +86,6 @@ public class ReservationQueue extends LeafQueue {
     }
     setCapacity(capacity);
     setAbsoluteCapacity(getParent().getAbsoluteCapacity() * getCapacity());
-    setMaxApplications((int) (maxSystemApps * getAbsoluteCapacity()));
     // note: we currently set maxCapacity to capacity
     // this might be revised later
     setMaxCapacity(entitlement.getMaxCapacity());
@@ -108,9 +103,9 @@ public class ReservationQueue extends LeafQueue {
     maxApplicationsPerUser = maxAppsPerUserForReservation;
   }
 
-  // used by the super constructor, we initialize to zero
-  protected float getCapacityFromConf() {
-    return 0f;
+  @Override
+  protected void setupConfigurableCapacities() {
+    CSQueueUtils.updateAndCheckCapacitiesByLabel(getQueuePath(),
+        queueCapacities, parent == null ? null : parent.getQueueCapacities());
   }
-
 }

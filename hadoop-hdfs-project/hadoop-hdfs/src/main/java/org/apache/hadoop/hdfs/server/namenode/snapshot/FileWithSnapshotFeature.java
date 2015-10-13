@@ -20,13 +20,16 @@ package org.apache.hadoop.hdfs.server.namenode.snapshot;
 import java.util.List;
 
 import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.hdfs.protocol.QuotaExceededException;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+import org.apache.hadoop.hdfs.server.namenode.AclFeature;
 import org.apache.hadoop.hdfs.server.namenode.INode;
-import org.apache.hadoop.hdfs.server.namenode.INode.BlocksMapUpdateInfo;
+import org.apache.hadoop.hdfs.server.namenode.AclStorage;
 import org.apache.hadoop.hdfs.server.namenode.INodeFile;
 import org.apache.hadoop.hdfs.server.namenode.INodeFileAttributes;
-import org.apache.hadoop.hdfs.server.namenode.Quota;
+import org.apache.hadoop.hdfs.server.namenode.QuotaCounts;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 
 /**
  * Feature for file with snapshot-related information.
@@ -62,10 +65,10 @@ public class FileWithSnapshotFeature implements INode.Feature {
   }
   
   /** @return the max replication factor in diffs */
-  public short getMaxBlockRepInDiffs() {
+  public short getMaxBlockRepInDiffs(FileDiff excluded) {
     short max = 0;
     for(FileDiff d : getDiffs()) {
-      if (d.snapshotINode != null) {
+      if (d != excluded && d.snapshotINode != null) {
         final short replication = d.snapshotINode.getFileReplication();
         if (replication > max) {
           max = replication;
@@ -113,22 +116,25 @@ public class FileWithSnapshotFeature implements INode.Feature {
     return (isCurrentFileDeleted()? "(DELETED), ": ", ") + diffs;
   }
   
-  public Quota.Counts cleanFile(final INodeFile file, final int snapshotId,
-      int priorSnapshotId, final BlocksMapUpdateInfo collectedBlocks,
-      final List<INode> removedINodes, final boolean countDiffChange)
-      throws QuotaExceededException {
+  public void cleanFile(INode.ReclaimContext reclaimContext,
+      final INodeFile file, final int snapshotId, int priorSnapshotId,
+      byte storagePolicyId) {
     if (snapshotId == Snapshot.CURRENT_STATE_ID) {
       // delete the current file while the file has snapshot feature
       if (!isCurrentFileDeleted()) {
         file.recordModification(priorSnapshotId);
         deleteCurrentFile();
       }
-      collectBlocksAndClear(file, collectedBlocks, removedINodes);
-      return Quota.Counts.newInstance();
+      final BlockStoragePolicy policy = reclaimContext.storagePolicySuite()
+          .getPolicy(storagePolicyId);
+      QuotaCounts old = file.storagespaceConsumed(policy);
+      collectBlocksAndClear(reclaimContext, file);
+      QuotaCounts current = file.storagespaceConsumed(policy);
+      reclaimContext.quotaDelta().add(old.subtract(current));
     } else { // delete the snapshot
       priorSnapshotId = getDiffs().updatePrior(snapshotId, priorSnapshotId);
-      return diffs.deleteSnapshotDiff(snapshotId, priorSnapshotId, file,
-          collectedBlocks, removedINodes, countDiffChange);
+      diffs.deleteSnapshotDiff(reclaimContext, snapshotId, priorSnapshotId,
+          file);
     }
   }
   
@@ -136,80 +142,87 @@ public class FileWithSnapshotFeature implements INode.Feature {
     this.diffs.clear();
   }
   
-  public Quota.Counts updateQuotaAndCollectBlocks(INodeFile file,
-      FileDiff removed, BlocksMapUpdateInfo collectedBlocks,
-      final List<INode> removedINodes) {
-    long oldDiskspace = file.diskspaceConsumed();
+  public void updateQuotaAndCollectBlocks(INode.ReclaimContext reclaimContext,
+      INodeFile file, FileDiff removed) {
+    byte storagePolicyID = file.getStoragePolicyID();
+    BlockStoragePolicy bsp = null;
+    if (storagePolicyID != HdfsConstants.BLOCK_STORAGE_POLICY_ID_UNSPECIFIED) {
+      bsp = reclaimContext.storagePolicySuite().
+          getPolicy(file.getStoragePolicyID());
+    }
+
+    QuotaCounts oldCounts;
     if (removed.snapshotINode != null) {
-      short replication = removed.snapshotINode.getFileReplication();
-      short currentRepl = file.getBlockReplication();
-      if (currentRepl == 0) {
-        oldDiskspace = file.computeFileSize(true, true) * replication;
-      } else if (replication > currentRepl) {  
-        oldDiskspace = oldDiskspace / file.getBlockReplication() * replication;
+      oldCounts = new QuotaCounts.Builder().build();
+      BlockInfo[] blocks = file.getBlocks() == null ? new
+          BlockInfo[0] : file.getBlocks();
+      for (BlockInfo b: blocks) {
+        short replication = b.getReplication();
+        long blockSize = b.isComplete() ? b.getNumBytes() : file
+            .getPreferredBlockSize();
+
+        oldCounts.addStorageSpace(blockSize * replication);
+
+        if (bsp != null) {
+          List<StorageType> oldTypeChosen = bsp.chooseStorageTypes(replication);
+          for (StorageType t : oldTypeChosen) {
+            if (t.supportTypeQuota()) {
+              oldCounts.addTypeSpace(t, blockSize);
+            }
+          }
+        }
+      }
+
+      AclFeature aclFeature = removed.getSnapshotINode().getAclFeature();
+      if (aclFeature != null) {
+        AclStorage.removeAclFeature(aclFeature);
+      }
+    } else {
+      oldCounts = file.storagespaceConsumed(null);
+    }
+
+    getDiffs().combineAndCollectSnapshotBlocks(reclaimContext, file, removed);
+    if (file.getBlocks() != null) {
+      short replInDiff = getMaxBlockRepInDiffs(removed);
+      short repl = (short) Math.max(file.getPreferredBlockReplication(),
+                                    replInDiff);
+      for (BlockInfo b : file.getBlocks()) {
+        if (repl != b.getReplication()) {
+          reclaimContext.collectedBlocks().addUpdateReplicationFactor(b, repl);
+        }
       }
     }
-    
-    collectBlocksAndClear(file, collectedBlocks, removedINodes);
-    
-    long dsDelta = oldDiskspace - file.diskspaceConsumed();
-    return Quota.Counts.newInstance(0, dsDelta);
+    QuotaCounts current = file.storagespaceConsumed(bsp);
+    reclaimContext.quotaDelta().add(oldCounts.subtract(current));
   }
-  
+
   /**
    * If some blocks at the end of the block list no longer belongs to
    * any inode, collect them and update the block list.
    */
-  private void collectBlocksAndClear(final INodeFile file,
-      final BlocksMapUpdateInfo info, final List<INode> removedINodes) {
+  public void collectBlocksAndClear(
+      INode.ReclaimContext reclaimContext, final INodeFile file) {
     // check if everything is deleted.
     if (isCurrentFileDeleted() && getDiffs().asList().isEmpty()) {
-      file.destroyAndCollectBlocks(info, removedINodes);
+      file.clearFile(reclaimContext);
       return;
     }
     // find max file size.
     final long max;
+    FileDiff diff = getDiffs().getLast();
     if (isCurrentFileDeleted()) {
-      final FileDiff last = getDiffs().getLast();
-      max = last == null? 0: last.getFileSize();
-    } else { 
+      max = diff == null? 0: diff.getFileSize();
+    } else {
       max = file.computeFileSize();
     }
 
-    collectBlocksBeyondMax(file, max, info);
-  }
-
-  private void collectBlocksBeyondMax(final INodeFile file, final long max,
-      final BlocksMapUpdateInfo collectedBlocks) {
-    final BlockInfo[] oldBlocks = file.getBlocks();
-    if (oldBlocks != null) {
-      //find the minimum n such that the size of the first n blocks > max
-      int n = 0;
-      for(long size = 0; n < oldBlocks.length && max > size; n++) {
-        size += oldBlocks[n].getNumBytes();
-      }
-      
-      // starting from block n, the data is beyond max.
-      if (n < oldBlocks.length) {
-        // resize the array.  
-        final BlockInfo[] newBlocks;
-        if (n == 0) {
-          newBlocks = BlockInfo.EMPTY_ARRAY;
-        } else {
-          newBlocks = new BlockInfo[n];
-          System.arraycopy(oldBlocks, 0, newBlocks, 0, n);
-        }
-        
-        // set new blocks
-        file.setBlocks(newBlocks);
-
-        // collect the blocks beyond max.  
-        if (collectedBlocks != null) {
-          for(; n < oldBlocks.length; n++) {
-            collectedBlocks.addDeleteBlock(oldBlocks[n]);
-          }
-        }
-      }
-    }
+    // Collect blocks that should be deleted
+    FileDiff last = diffs.getLast();
+    BlockInfo[] snapshotBlocks = last == null ? null : last.getBlocks();
+    if(snapshotBlocks == null)
+      file.collectBlocksBeyondMax(max, reclaimContext.collectedBlocks());
+    else
+      file.collectBlocksBeyondSnapshot(snapshotBlocks,
+                                       reclaimContext.collectedBlocks());
   }
 }

@@ -49,7 +49,6 @@ public class TestSSLHttpServer extends HttpServerFunctionalTest {
   private static final Log LOG = LogFactory.getLog(TestSSLHttpServer.class);
   private static Configuration conf;
   private static HttpServer2 server;
-  private static URL baseUrl;
   private static String keystoresDir;
   private static String sslConfDir;
   private static SSLFactory clientSslFactory;
@@ -66,9 +65,7 @@ public class TestSSLHttpServer extends HttpServerFunctionalTest {
     sslConfDir = KeyStoreTestUtil.getClasspathDir(TestSSLHttpServer.class);
 
     KeyStoreTestUtil.setupSSLConfig(keystoresDir, sslConfDir, conf, false);
-    Configuration sslConf = new Configuration(false);
-    sslConf.addResource("ssl-server.xml");
-    sslConf.addResource("ssl-client.xml");
+    Configuration sslConf = KeyStoreTestUtil.getSslConfig();
 
     clientSslFactory = new SSLFactory(SSLFactory.Mode.CLIENT, sslConf);
     clientSslFactory.init();
@@ -85,6 +82,7 @@ public class TestSSLHttpServer extends HttpServerFunctionalTest {
             sslConf.get("ssl.server.truststore.password"),
             sslConf.get("ssl.server.truststore.type", "jks")).build();
     server.addServlet("echo", "/echo", TestHttpServer.EchoServlet.class);
+    server.addServlet("longheader", "/longheader", LongHeaderServlet.class);
     server.start();
     baseUrl = new URL("https://"
         + NetUtils.getHostPortString(server.getConnectorAddress(0)));
@@ -104,6 +102,19 @@ public class TestSSLHttpServer extends HttpServerFunctionalTest {
     assertEquals("a:b\nc:d\n", readOut(new URL(baseUrl, "/echo?a=b&c=d")));
     assertEquals("a:b\nc&lt;:d\ne:&gt;\n", readOut(new URL(baseUrl,
         "/echo?a=b&c<=d&e=>")));
+  }
+
+  /**
+   *  Test that verifies headers can be up to 64K long.
+   *  The test adds a 63K header leaving 1K for other headers.
+   *  This is because the header buffer setting is for ALL headers,
+   *  names and values included. */
+  @Test
+  public void testLongHeader() throws Exception {
+    URL url = new URL(baseUrl, "/longheader");
+    HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
+    conn.setSSLSocketFactory(clientSslFactory.createSSLSocketFactory());
+    testLongHeader(conn);
   }
 
   private static String readOut(URL url) throws Exception {

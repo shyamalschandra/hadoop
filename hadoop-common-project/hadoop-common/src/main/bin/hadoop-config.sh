@@ -1,4 +1,4 @@
-#
+#!/usr/bin/env bash
 #
 # Licensed to the Apache Software Foundation (ASF) under one or more
 # contributor license agreements.  See the NOTICE file distributed with
@@ -53,7 +53,7 @@ if [[ -z "${HADOOP_LIBEXEC_DIR}" ]]; then
 fi
 
 # get our functions defined for usage later
-if [[ -n "${HADOOP_COMMON_HOME}" ]] && 
+if [[ -n "${HADOOP_COMMON_HOME}" ]] &&
    [[ -e "${HADOOP_COMMON_HOME}/libexec/hadoop-functions.sh" ]]; then
   . "${HADOOP_COMMON_HOME}/libexec/hadoop-functions.sh"
 elif [[ -e "${HADOOP_LIBEXEC_DIR}/hadoop-functions.sh" ]]; then
@@ -76,7 +76,7 @@ fi
 #
 
 # Let's go!  Base definitions so we can move forward
-hadoop_bootstrap_init
+hadoop_bootstrap
 
 # let's find our conf.
 #
@@ -91,82 +91,25 @@ hadoop_bootstrap_init
 
 # save these off in case our caller needs them
 # shellcheck disable=SC2034
-HADOOP_USER_PARAMS="$@"
+HADOOP_USER_PARAMS=("$@")
 
-HADOOP_DAEMON_MODE="default"
+hadoop_parse_args "$@"
+shift "${HADOOP_PARSE_COUNTER}"
 
-while [[ -z "${_hadoop_common_done}" ]]; do
-  case $1 in
-    --buildpaths)
-      # shellcheck disable=SC2034
-      HADOOP_ENABLE_BUILD_PATHS=true
-      shift
-    ;;
-    --config)
-      shift
-      confdir=$1
-      shift
-      if [[ -d "${confdir}" ]]; then
-        # shellcheck disable=SC2034
-        YARN_CONF_DIR="${confdir}"
-        # shellcheck disable=SC2034
-        HADOOP_CONF_DIR="${confdir}"
-      elif [[ -z "${confdir}" ]]; then
-        hadoop_error "ERROR: No parameter provided for --config "
-        hadoop_exit_with_usage 1
-      else
-        hadoop_error "ERROR: Cannot find configuration directory \"${confdir}\""
-        hadoop_exit_with_usage 1
-      fi
-    ;;
-    --daemon)
-      shift
-      HADOOP_DAEMON_MODE=$1
-      shift
-      if [[ -z "${HADOOP_DAEMON_MODE}" || \
-        ! "${HADOOP_DAEMON_MODE}" =~ ^st(art|op|atus)$ ]]; then
-        hadoop_error "ERROR: --daemon must be followed by either \"start\", \"stop\", or \"status\"."
-        hadoop_exit_with_usage 1
-      fi
-    ;;
-    --debug)
-      shift
-      # shellcheck disable=SC2034
-      HADOOP_SHELL_SCRIPT_DEBUG=true
-    ;; 
-    --help|-help|-h|help|--h|--\?|-\?|\?)
-      hadoop_exit_with_usage 0
-    ;;
-    --hostnames)
-      shift
-      # shellcheck disable=SC2034
-      HADOOP_SLAVE_NAMES="$1"
-      shift
-    ;;
-    --hosts)
-      shift
-      hadoop_populate_slaves_file "$1"
-      shift
-    ;;
-    --loglevel)
-      shift
-      # shellcheck disable=SC2034
-      HADOOP_LOGLEVEL="$1"
-      shift
-    ;;
-    *)
-      _hadoop_common_done=true
-    ;;
-  esac
-done
-
+#
+# Setup the base-line environment
+#
 hadoop_find_confdir
 hadoop_exec_hadoopenv
+hadoop_import_shellprofiles
 hadoop_exec_userfuncs
 
 #
 # IMPORTANT! User provided code is now available!
 #
+
+hadoop_exec_hadooprc
+hadoop_verify_confdir
 
 # do all the OS-specific startup bits here
 # this allows us to get a decent JAVA_HOME,
@@ -182,22 +125,20 @@ if declare -F hadoop_subproject_init >/dev/null ; then
   hadoop_subproject_init
 fi
 
+hadoop_shellprofiles_init
+
 # get the native libs in there pretty quick
 hadoop_add_javalibpath "${HADOOP_PREFIX}/build/native"
 hadoop_add_javalibpath "${HADOOP_PREFIX}/${HADOOP_COMMON_LIB_NATIVE_DIR}"
 
+hadoop_shellprofiles_nativelib
+
 # get the basic java class path for these subprojects
 # in as quickly as possible since other stuff
 # will definitely depend upon it.
-#
-# at some point, this will get replaced with something pluggable
-# so that these functions can sit in their projects rather than
-# common
-#
-for i in common hdfs yarn mapred
-do
-  hadoop_add_to_classpath_$i
-done
+
+hadoop_add_common_to_classpath
+hadoop_shellprofiles_classpath
 
 #
 # backwards compatibility. new stuff should

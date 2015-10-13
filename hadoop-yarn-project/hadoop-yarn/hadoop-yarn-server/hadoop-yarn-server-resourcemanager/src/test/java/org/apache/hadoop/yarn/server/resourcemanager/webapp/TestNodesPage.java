@@ -40,15 +40,14 @@ import com.google.inject.Module;
 public class TestNodesPage {
   
   final int numberOfRacks = 2;
-  final int numberOfNodesPerRack = 6;
+  final int numberOfNodesPerRack = 8;
   // The following is because of the way TestRMWebApp.mockRMContext creates
   // nodes.
-  final int numberOfLostNodesPerRack = numberOfNodesPerRack
-      / NodeState.values().length;
+  final int numberOfLostNodesPerRack = 1;
 
   // Number of Actual Table Headers for NodesPage.NodesBlock might change in
   // future. In that case this value should be adjusted to the new value.
-  final int numberOfThInMetricsTable = 16;
+  final int numberOfThInMetricsTable = 22;
   final int numberOfActualTableHeaders = 13;
 
   private Injector injector;
@@ -103,6 +102,51 @@ public class TestNodesPage {
     Mockito.verify(
         writer,
         Mockito.times(numberOfRacks * numberOfLostNodesPerRack
+            * numberOfActualTableHeaders + numberOfThInMetricsTable)).print(
+        "<td");
+  }
+  
+  @Test
+  public void testNodesBlockRenderForNodeLabelFilterWithNonEmptyLabel() {
+    NodesBlock nodesBlock = injector.getInstance(NodesBlock.class);
+    nodesBlock.set("node.label", "x");
+    nodesBlock.render();
+    PrintWriter writer = injector.getInstance(PrintWriter.class);
+    WebAppTests.flushOutput(injector);
+
+    Mockito.verify(
+        writer,
+        Mockito.times(numberOfRacks
+            * numberOfActualTableHeaders + numberOfThInMetricsTable)).print(
+        "<td");
+  }
+  
+  @Test
+  public void testNodesBlockRenderForNodeLabelFilterWithEmptyLabel() {
+    NodesBlock nodesBlock = injector.getInstance(NodesBlock.class);
+    nodesBlock.set("node.label", "");
+    nodesBlock.render();
+    PrintWriter writer = injector.getInstance(PrintWriter.class);
+    WebAppTests.flushOutput(injector);
+
+    Mockito.verify(
+        writer,
+        Mockito.times(numberOfRacks * (numberOfNodesPerRack - 1)
+            * numberOfActualTableHeaders + numberOfThInMetricsTable)).print(
+        "<td");
+  }
+  
+  @Test
+  public void testNodesBlockRenderForNodeLabelFilterWithAnyLabel() {
+    NodesBlock nodesBlock = injector.getInstance(NodesBlock.class);
+    nodesBlock.set("node.label", "*");
+    nodesBlock.render();
+    PrintWriter writer = injector.getInstance(PrintWriter.class);
+    WebAppTests.flushOutput(injector);
+
+    Mockito.verify(
+        writer,
+        Mockito.times(numberOfRacks * numberOfNodesPerRack
             * numberOfActualTableHeaders + numberOfThInMetricsTable)).print(
         "<td");
   }

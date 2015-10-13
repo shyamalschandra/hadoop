@@ -43,7 +43,9 @@ import org.apache.hadoop.hdfs.NameNodeProxies;
 import org.apache.hadoop.hdfs.protocol.AlreadyBeingCreatedException;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants.DatanodeReportType;
+import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 import org.apache.hadoop.hdfs.server.protocol.BlocksWithLocations;
 import org.apache.hadoop.hdfs.server.protocol.DatanodeStorageReport;
 import org.apache.hadoop.hdfs.server.protocol.NamenodeProtocol;
@@ -60,18 +62,18 @@ import com.google.common.annotations.VisibleForTesting;
 public class NameNodeConnector implements Closeable {
   private static final Log LOG = LogFactory.getLog(NameNodeConnector.class);
 
-  private static final int MAX_NOT_CHANGED_ITERATIONS = 5;
+  public static final int DEFAULT_MAX_IDLE_ITERATIONS = 5;
   private static boolean write2IdFile = true;
   
   /** Create {@link NameNodeConnector} for the given namenodes. */
   public static List<NameNodeConnector> newNameNodeConnectors(
-      Collection<URI> namenodes, String name, Path idPath, Configuration conf)
-      throws IOException {
+      Collection<URI> namenodes, String name, Path idPath, Configuration conf,
+      int maxIdleIterations) throws IOException {
     final List<NameNodeConnector> connectors = new ArrayList<NameNodeConnector>(
         namenodes.size());
     for (URI uri : namenodes) {
       NameNodeConnector nnc = new NameNodeConnector(name, uri, idPath,
-          null, conf);
+          null, conf, maxIdleIterations);
       nnc.getKeyManager().startBlockKeyUpdater();
       connectors.add(nnc);
     }
@@ -80,12 +82,12 @@ public class NameNodeConnector implements Closeable {
 
   public static List<NameNodeConnector> newNameNodeConnectors(
       Map<URI, List<Path>> namenodes, String name, Path idPath,
-      Configuration conf) throws IOException {
+      Configuration conf, int maxIdleIterations) throws IOException {
     final List<NameNodeConnector> connectors = new ArrayList<NameNodeConnector>(
         namenodes.size());
     for (Map.Entry<URI, List<Path>> entry : namenodes.entrySet()) {
       NameNodeConnector nnc = new NameNodeConnector(name, entry.getKey(),
-          idPath, entry.getValue(), conf);
+          idPath, entry.getValue(), conf, maxIdleIterations);
       nnc.getKeyManager().startBlockKeyUpdater();
       connectors.add(nnc);
     }
@@ -111,15 +113,18 @@ public class NameNodeConnector implements Closeable {
   private final List<Path> targetPaths;
   private final AtomicLong bytesMoved = new AtomicLong();
 
+  private final int maxNotChangedIterations;
   private int notChangedIterations = 0;
 
   public NameNodeConnector(String name, URI nameNodeUri, Path idPath,
-                           List<Path> targetPaths, Configuration conf)
+                           List<Path> targetPaths, Configuration conf,
+                           int maxNotChangedIterations)
       throws IOException {
     this.nameNodeUri = nameNodeUri;
     this.idPath = idPath;
     this.targetPaths = targetPaths == null || targetPaths.isEmpty() ? Arrays
         .asList(new Path("/")) : targetPaths;
+    this.maxNotChangedIterations = maxNotChangedIterations;
 
     this.namenode = NameNodeProxies.createProxy(conf, nameNodeUri,
         NamenodeProtocol.class).getProxy();
@@ -160,6 +165,20 @@ public class NameNodeConnector implements Closeable {
     return namenode.getBlocks(datanode, size);
   }
 
+  /**
+   * @return true if an upgrade is in progress, false if not.
+   * @throws IOException
+   */
+  public boolean isUpgrading() throws IOException {
+    // fsimage upgrade
+    final boolean isUpgrade = !namenode.isUpgradeFinalized();
+    // rolling upgrade
+    RollingUpgradeInfo info = fs.rollingUpgrade(
+        HdfsConstants.RollingUpgradeAction.QUERY);
+    final boolean isRollingUpgrade = (info != null && !info.isFinalized());
+    return (isUpgrade || isRollingUpgrade);
+  }
+
   /** @return live datanode storage reports. */
   public DatanodeStorageReport[] getLiveDatanodeStorageReport()
       throws IOException {
@@ -182,7 +201,14 @@ public class NameNodeConnector implements Closeable {
       notChangedIterations = 0;
     } else {
       notChangedIterations++;
-      if (notChangedIterations >= MAX_NOT_CHANGED_ITERATIONS) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("No block has been moved for " +
+            notChangedIterations + " iterations, " +
+            "maximum notChangedIterations before exit is: " +
+            ((maxNotChangedIterations >= 0) ? maxNotChangedIterations : "Infinite"));
+      }
+      if ((maxNotChangedIterations >= 0) &&
+          (notChangedIterations >= maxNotChangedIterations)) {
         System.out.println("No block has been moved for "
             + notChangedIterations + " iterations. Exiting...");
         return false;
@@ -209,12 +235,20 @@ public class NameNodeConnector implements Closeable {
    */
   private OutputStream checkAndMarkRunning() throws IOException {
     try {
-      final FSDataOutputStream out = fs.create(idPath);
-      if (write2IdFile) {
-        out.writeBytes(InetAddress.getLocalHost().getHostName());
-        out.hflush();
+      if (fs.exists(idPath)) {
+        // try appending to it so that it will fail fast if another balancer is
+        // running.
+        IOUtils.closeStream(fs.append(idPath));
+        fs.delete(idPath, true);
       }
-      return out;
+      final FSDataOutputStream fsout = fs.create(idPath, false);
+      // mark balancer idPath to be deleted during filesystem closure
+      fs.deleteOnExit(idPath);
+      if (write2IdFile) {
+        fsout.writeBytes(InetAddress.getLocalHost().getHostName());
+        fsout.hflush();
+      }
+      return fsout;
     } catch(RemoteException e) {
       if(AlreadyBeingCreatedException.class.getName().equals(e.getClassName())){
         return null;

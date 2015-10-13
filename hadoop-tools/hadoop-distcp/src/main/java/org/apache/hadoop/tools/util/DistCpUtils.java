@@ -51,6 +51,7 @@ import org.apache.hadoop.tools.DistCpOptions.FileAttribute;
 import org.apache.hadoop.tools.mapred.UniformSizeInputFormat;
 
 import com.google.common.collect.Maps;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * Utility functions used in DistCp.
@@ -64,7 +65,7 @@ public class DistCpUtils {
    * @param path The path of the file whose size is sought.
    * @param configuration Configuration, to retrieve the appropriate FileSystem.
    * @return The file-size, in number of bytes.
-   * @throws IOException, on failure.
+   * @throws IOException
    */
   public static long getFileSize(Path path, Configuration configuration)
                                             throws IOException {
@@ -121,8 +122,9 @@ public class DistCpUtils {
    */
   public static Class<? extends InputFormat> getStrategy(Configuration conf,
                                                                  DistCpOptions options) {
-    String confLabel = "distcp." +
-        options.getCopyStrategy().toLowerCase(Locale.getDefault()) + ".strategy.impl";
+    String confLabel = "distcp."
+        + StringUtils.toLowerCase(options.getCopyStrategy())
+        + ".strategy" + ".impl";
     return conf.getClass(confLabel, UniformSizeInputFormat.class, InputFormat.class);
   }
 
@@ -221,7 +223,8 @@ public class DistCpUtils {
 
     final boolean preserveXAttrs = attributes.contains(FileAttribute.XATTR);
     if (preserveXAttrs || preserveRawXattrs) {
-      final String rawNS = XAttr.NameSpace.RAW.name().toLowerCase();
+      final String rawNS =
+          StringUtils.toLowerCase(XAttr.NameSpace.RAW.name());
       Map<String, byte[]> srcXAttrs = srcFileStatus.getXAttrs();
       Map<String, byte[]> targetXAttrs = getXAttrs(targetFS, path);
       if (srcXAttrs != null && !srcXAttrs.equals(targetXAttrs)) {
@@ -267,7 +270,7 @@ public class DistCpUtils {
    *
    * @param fileSystem FileSystem containing the file
    * @param fileStatus FileStatus of file
-   * @return List<AclEntry> containing full logical ACL
+   * @return List containing full logical ACL
    * @throws IOException if there is an I/O error
    */
   public static List<AclEntry> getAcl(FileSystem fileSystem,
@@ -282,7 +285,7 @@ public class DistCpUtils {
    * 
    * @param fileSystem FileSystem containing the file
    * @param path file path
-   * @return Map<String, byte[]> containing all xAttrs
+   * @return Map containing all xAttrs
    * @throws IOException if there is an I/O error
    */
   public static Map<String, byte[]> getXAttrs(FileSystem fileSystem,
@@ -321,7 +324,8 @@ public class DistCpUtils {
          copyListingFileStatus.setXAttrs(srcXAttrs);
       } else {
         Map<String, byte[]> trgXAttrs = Maps.newHashMap();
-        final String rawNS = XAttr.NameSpace.RAW.name().toLowerCase();
+        final String rawNS =
+            StringUtils.toLowerCase(XAttr.NameSpace.RAW.name());
         for (Map.Entry<String, byte[]> ent : srcXAttrs.entrySet()) {
           final String xattrName = ent.getKey();
           if (xattrName.startsWith(rawNS)) {
@@ -402,7 +406,7 @@ public class DistCpUtils {
   /**
    * String utility to convert a number-of-bytes to human readable format.
    */
-  private static ThreadLocal<DecimalFormat> FORMATTER
+  private static final ThreadLocal<DecimalFormat> FORMATTER
                         = new ThreadLocal<DecimalFormat>() {
     @Override
     protected DecimalFormat initialValue() {
@@ -463,44 +467,5 @@ public class DistCpUtils {
     }
     return (sourceChecksum == null || targetChecksum == null ||
             sourceChecksum.equals(targetChecksum));
-  }
-
-  /* see if two file systems are the same or not
-   *
-   */
-  public static boolean compareFs(FileSystem srcFs, FileSystem destFs) {
-    URI srcUri = srcFs.getUri();
-    URI dstUri = destFs.getUri();
-    if (srcUri.getScheme() == null) {
-      return false;
-    }
-    if (!srcUri.getScheme().equals(dstUri.getScheme())) {
-      return false;
-    }
-    String srcHost = srcUri.getHost();
-    String dstHost = dstUri.getHost();
-    if ((srcHost != null) && (dstHost != null)) {
-      try {
-        srcHost = InetAddress.getByName(srcHost).getCanonicalHostName();
-        dstHost = InetAddress.getByName(dstHost).getCanonicalHostName();
-      } catch(UnknownHostException ue) {
-        if (LOG.isDebugEnabled())
-          LOG.debug("Could not compare file-systems. Unknown host: ", ue);
-        return false;
-      }
-      if (!srcHost.equals(dstHost)) {
-        return false;
-      }
-    }
-    else if (srcHost == null && dstHost != null) {
-      return false;
-    }
-    else if (srcHost != null) {
-      return false;
-    }
-
-    //check for ports
-
-    return srcUri.getPort() == dstUri.getPort();
   }
 }

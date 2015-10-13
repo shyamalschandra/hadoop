@@ -28,8 +28,6 @@ import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.yarn.api.ApplicationMasterProtocol;
 import org.apache.hadoop.yarn.api.records.AMCommand;
 import org.apache.hadoop.yarn.api.records.Container;
-import org.apache.hadoop.yarn.api.records.ContainerResourceDecrease;
-import org.apache.hadoop.yarn.api.records.ContainerResourceIncrease;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
 import org.apache.hadoop.yarn.api.records.NMToken;
 import org.apache.hadoop.yarn.api.records.NodeReport;
@@ -39,27 +37,35 @@ import org.apache.hadoop.yarn.api.records.Token;
 import org.apache.hadoop.yarn.util.Records;
 
 /**
- * <p>The response sent by the <code>ResourceManager</code> the  
- * <code>ApplicationMaster</code> during resource negotiation.</p>
- *
- * <p>The response, includes:
- *   <ul>
- *     <li>Response ID to track duplicate responses.</li>
- *     <li>
- *       An AMCommand sent by ResourceManager to let the <code>ApplicationMaster</code>
- *       take some actions (resync, shutdown etc.).
- *     <li>A list of newly allocated {@link Container}.</li>
- *     <li>A list of completed {@link Container}s' statuses.</li>
- *     <li>
- *       The available headroom for resources in the cluster for the
- *       application. 
- *     </li>
- *     <li>A list of nodes whose status has been updated.</li>
- *     <li>The number of available nodes in a cluster.</li>
- *     <li>A description of resources requested back by the cluster</li>
- *     <li>AMRMToken, if AMRMToken has been rolled over</li>
- *   </ul>
- * </p>
+ * The response sent by the <code>ResourceManager</code> the
+ * <code>ApplicationMaster</code> during resource negotiation.
+ * <p>
+ * The response, includes:
+ * <ul>
+ *   <li>Response ID to track duplicate responses.</li>
+ *   <li>
+ *     An AMCommand sent by ResourceManager to let the
+ *     {@code ApplicationMaster} take some actions (resync, shutdown etc.).
+ *   </li>
+ *   <li>A list of newly allocated {@link Container}.</li>
+ *   <li>A list of completed {@link Container}s' statuses.</li>
+ *   <li>
+ *     The available headroom for resources in the cluster for the
+ *     application.
+ *   </li>
+ *   <li>A list of nodes whose status has been updated.</li>
+ *   <li>The number of available nodes in a cluster.</li>
+ *   <li>A description of resources requested back by the cluster</li>
+ *   <li>AMRMToken, if AMRMToken has been rolled over</li>
+ *   <li>
+ *     A list of {@link Container} representing the containers
+ *     whose resource has been increased.
+ *   </li>
+ *   <li>
+ *     A list of {@link Container} representing the containers
+ *     whose resource has been decreased.
+ *   </li>
+ * </ul>
  * 
  * @see ApplicationMasterProtocol#allocate(AllocateRequest)
  */
@@ -94,8 +100,8 @@ public abstract class AllocateResponse {
       List<Container> allocatedContainers, List<NodeReport> updatedNodes,
       Resource availResources, AMCommand command, int numClusterNodes,
       PreemptionMessage preempt, List<NMToken> nmTokens,
-      List<ContainerResourceIncrease> increasedContainers,
-      List<ContainerResourceDecrease> decreasedContainers) {
+      List<Container> increasedContainers,
+      List<Container> decreasedContainers) {
     AllocateResponse response = newInstance(responseId, completedContainers,
         allocatedContainers, updatedNodes, availResources, command,
         numClusterNodes, preempt, nmTokens);
@@ -111,8 +117,8 @@ public abstract class AllocateResponse {
       List<Container> allocatedContainers, List<NodeReport> updatedNodes,
       Resource availResources, AMCommand command, int numClusterNodes,
       PreemptionMessage preempt, List<NMToken> nmTokens, Token amRMToken,
-      List<ContainerResourceIncrease> increasedContainers,
-      List<ContainerResourceDecrease> decreasedContainers) {
+      List<Container> increasedContainers,
+      List<Container> decreasedContainers) {
     AllocateResponse response =
         newInstance(responseId, completedContainers, allocatedContainers,
           updatedNodes, availResources, command, numClusterNodes, preempt,
@@ -220,16 +226,16 @@ public abstract class AllocateResponse {
   public abstract void setNumClusterNodes(int numNodes);
 
   /**
-   * <p>Get the description of containers owned by the AM, but requested back by
+   * Get the description of containers owned by the AM, but requested back by
    * the cluster. Note that the RM may have an inconsistent view of the
    * resources owned by the AM. These messages are advisory, and the AM may
-   * elect to ignore them.<p>
-   *
-   * <p>The message is a snapshot of the resources the RM wants back from the AM.
+   * elect to ignore them.
+   * <p>
+   * The message is a snapshot of the resources the RM wants back from the AM.
    * While demand persists, the RM will repeat its request; applications should
-   * not interpret each message as a request for <em>additional<em>
+   * not interpret each message as a request for <em>additional</em>
    * resources on top of previous messages. Resources requested consistently
-   * over some duration may be forcibly killed by the RM.<p>
+   * over some duration may be forcibly killed by the RM.
    *
    * @return A specification of the resources to reclaim from this AM.
    */
@@ -242,15 +248,17 @@ public abstract class AllocateResponse {
   public abstract void setPreemptionMessage(PreemptionMessage request);
 
   /**
-   * <p>Get the list of NMTokens required for communicating with NM. New NMTokens
-   * issued only if<p>
-   * <p>1) AM is receiving first container on underlying NodeManager.<br>
+   * Get the list of NMTokens required for communicating with NM. New NMTokens
+   * issued only if
+   * <p>
+   * 1) AM is receiving first container on underlying NodeManager.<br>
    * OR<br>
    * 2) NMToken master key rolled over in ResourceManager and AM is getting new
-   * container on the same underlying NodeManager.<p>
-   * <p>AM will receive one NMToken per NM irrespective of the number of containers
+   * container on the same underlying NodeManager.
+   * <p>
+   * AM will receive one NMToken per NM irrespective of the number of containers
    * issued on same NM. AM is expected to store these tokens until issued a
-   * new token for the same NM.<p>
+   * new token for the same NM.
    */
   @Public
   @Stable
@@ -261,34 +269,38 @@ public abstract class AllocateResponse {
   public abstract void setNMTokens(List<NMToken> nmTokens);
   
   /**
-   * Get the list of newly increased containers by <code>ResourceManager</code>
+   * Get the list of newly increased containers by
+   * <code>ResourceManager</code>.
    */
   @Public
-  @Stable
-  public abstract List<ContainerResourceIncrease> getIncreasedContainers();
+  @Unstable
+  public abstract List<Container> getIncreasedContainers();
 
   /**
-   * Set the list of newly increased containers by <code>ResourceManager</code>
+   * Set the list of newly increased containers by
+   * <code>ResourceManager</code>.
    */
   @Private
   @Unstable
   public abstract void setIncreasedContainers(
-      List<ContainerResourceIncrease> increasedContainers);
+      List<Container> increasedContainers);
 
   /**
-   * Get the list of newly decreased containers by <code>NodeManager</code>
+   * Get the list of newly decreased containers by
+   * <code>ResourceManager</code>.
    */
   @Public
-  @Stable
-  public abstract List<ContainerResourceDecrease> getDecreasedContainers();
+  @Unstable
+  public abstract List<Container> getDecreasedContainers();
 
   /**
-   * Set the list of newly decreased containers by <code>NodeManager</code>
+   * Set the list of newly decreased containers by
+   * <code>ResourceManager</code>.
    */
   @Private
   @Unstable
   public abstract void setDecreasedContainers(
-      List<ContainerResourceDecrease> decreasedContainers);
+      List<Container> decreasedContainers);
 
   /**
    * The AMRMToken that belong to this attempt

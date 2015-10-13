@@ -19,9 +19,9 @@
 package org.apache.hadoop.yarn.server.resourcemanager.webapp;
 
 import org.apache.hadoop.util.StringUtils;
-import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
 import org.apache.hadoop.yarn.server.resourcemanager.ResourceManager;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.ClusterMetricsInfo;
+import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.SchedulerInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.webapp.dao.UserMetricsInfo;
 
 import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
@@ -38,13 +38,11 @@ import com.google.inject.Inject;
 public class MetricsOverviewTable extends HtmlBlock {
   private static final long BYTES_IN_MB = 1024 * 1024;
 
-  private final RMContext rmContext;
   private final ResourceManager rm;
 
   @Inject
-  MetricsOverviewTable(RMContext context, ResourceManager rm, ViewContext ctx) {
+  MetricsOverviewTable(ResourceManager rm, ViewContext ctx) {
     super(ctx);
-    this.rmContext = context;
     this.rm = rm;
   }
 
@@ -56,7 +54,7 @@ public class MetricsOverviewTable extends HtmlBlock {
     html.style(".metrics {margin-bottom:5px}"); 
     
     ClusterMetricsInfo clusterMetrics = 
-        new ClusterMetricsInfo(this.rm, this.rmContext);
+ new ClusterMetricsInfo(this.rm);
     
     DIV<Hamlet> div = html.div().$class("metrics");
     
@@ -80,6 +78,7 @@ public class MetricsOverviewTable extends HtmlBlock {
         th().$class("ui-state-default")._("Lost Nodes")._().
         th().$class("ui-state-default")._("Unhealthy Nodes")._().
         th().$class("ui-state-default")._("Rebooted Nodes")._().
+        th().$class("ui-state-default")._("Shutdown Nodes")._().
       _().
     _().
     tbody().$class("ui-widget-content").
@@ -105,12 +104,13 @@ public class MetricsOverviewTable extends HtmlBlock {
         td().a(url("nodes/lost"),String.valueOf(clusterMetrics.getLostNodes()))._().
         td().a(url("nodes/unhealthy"),String.valueOf(clusterMetrics.getUnhealthyNodes()))._().
         td().a(url("nodes/rebooted"),String.valueOf(clusterMetrics.getRebootedNodes()))._().
+        td().a(url("nodes/shutdown"),String.valueOf(clusterMetrics.getShutdownNodes()))._().
       _().
     _()._();
     
     String user = request().getRemoteUser();
     if (user != null) {
-      UserMetricsInfo userMetrics = new UserMetricsInfo(this.rm, this.rmContext, user);
+      UserMetricsInfo userMetrics = new UserMetricsInfo(this.rm, user);
       if (userMetrics.metricsAvailable()) {
         div.h3("User Metrics for " + user).
         table("#usermetricsoverview").
@@ -156,6 +156,30 @@ public class MetricsOverviewTable extends HtmlBlock {
         
       }
     }
+    
+    SchedulerInfo schedulerInfo=new SchedulerInfo(this.rm);
+    
+    div.h3("Scheduler Metrics").
+    table("#schedulermetricsoverview").
+    thead().$class("ui-widget-header").
+      tr().
+        th().$class("ui-state-default")._("Scheduler Type")._().
+        th().$class("ui-state-default")._("Scheduling Resource Type")._().
+        th().$class("ui-state-default")._("Minimum Allocation")._().
+        th().$class("ui-state-default")._("Maximum Allocation")._().
+        th().$class("ui-state-default")
+            ._("Maximum Cluster Application Priority")._().
+      _().
+    _().
+    tbody().$class("ui-widget-content").
+      tr().
+        td(String.valueOf(schedulerInfo.getSchedulerType())).
+        td(String.valueOf(schedulerInfo.getSchedulerResourceTypes())).
+        td(schedulerInfo.getMinAllocation().toString()).
+        td(schedulerInfo.getMaxAllocation().toString()).
+        td(String.valueOf(schedulerInfo.getMaxClusterLevelAppPriority())).
+      _().
+    _()._();
 
     div._();
   }

@@ -67,7 +67,7 @@ import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
  */
 public abstract class RMCommunicator extends AbstractService
     implements RMHeartbeatHandler {
-  private static final Log LOG = LogFactory.getLog(RMContainerAllocator.class);
+  private static final Log LOG = LogFactory.getLog(RMCommunicator.class);
   private int rmPollInterval;//millis
   protected ApplicationId applicationId;
   private final AtomicBoolean stopped;
@@ -76,7 +76,6 @@ public abstract class RMCommunicator extends AbstractService
   protected EventHandler eventHandler;
   protected ApplicationMasterProtocol scheduler;
   private final ClientService clientService;
-  protected int lastResponseID;
   private Resource maxContainerCapability;
   protected Map<ApplicationAccessType, String> applicationACLs;
   private volatile long lastHeartbeatTime;
@@ -271,35 +270,38 @@ public abstract class RMCommunicator extends AbstractService
     super.serviceStop();
   }
 
-  protected void startAllocatorThread() {
-    allocatorThread = new Thread(new Runnable() {
-      @Override
-      public void run() {
-        while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
+  @VisibleForTesting
+  public class AllocatorRunnable implements Runnable {
+    @Override
+    public void run() {
+      while (!stopped.get() && !Thread.currentThread().isInterrupted()) {
+        try {
+          Thread.sleep(rmPollInterval);
           try {
-            Thread.sleep(rmPollInterval);
-            try {
-              heartbeat();
-            } catch (YarnRuntimeException e) {
-              LOG.error("Error communicating with RM: " + e.getMessage() , e);
-              return;
-            } catch (Exception e) {
-              LOG.error("ERROR IN CONTACTING RM. ", e);
-              continue;
-              // TODO: for other exceptions
-            }
-
-            lastHeartbeatTime = context.getClock().getTime();
-            executeHeartbeatCallbacks();
-          } catch (InterruptedException e) {
-            if (!stopped.get()) {
-              LOG.warn("Allocated thread interrupted. Returning.");
-            }
+            heartbeat();
+          } catch (RMContainerAllocationException e) {
+            LOG.error("Error communicating with RM: " + e.getMessage() , e);
             return;
+          } catch (Exception e) {
+            LOG.error("ERROR IN CONTACTING RM. ", e);
+            continue;
+            // TODO: for other exceptions
           }
+
+          lastHeartbeatTime = context.getClock().getTime();
+          executeHeartbeatCallbacks();
+        } catch (InterruptedException e) {
+          if (!stopped.get()) {
+            LOG.warn("Allocated thread interrupted. Returning.");
+          }
+          return;
         }
       }
-    });
+    }
+  }
+
+  protected void startAllocatorThread() {
+    allocatorThread = new Thread(new AllocatorRunnable());
     allocatorThread.setName("RMCommunicator Allocator");
     allocatorThread.start();
   }

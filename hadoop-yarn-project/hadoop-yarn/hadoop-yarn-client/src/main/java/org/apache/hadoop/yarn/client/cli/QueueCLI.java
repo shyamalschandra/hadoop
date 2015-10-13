@@ -18,7 +18,9 @@
 package org.apache.hadoop.yarn.client.cli;
 
 import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
+import java.nio.charset.Charset;
 import java.text.DecimalFormat;
 import java.util.Set;
 
@@ -30,6 +32,7 @@ import org.apache.commons.cli.Options;
 import org.apache.hadoop.classification.InterfaceAudience.Private;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.yarn.api.records.NodeLabel;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 
@@ -102,7 +105,8 @@ public class QueueCLI extends YarnCLI {
    */
   private int listQueue(String queueName) throws YarnException, IOException {
     int rc;
-    PrintWriter writer = new PrintWriter(sysout);
+    PrintWriter writer = new PrintWriter(
+        new OutputStreamWriter(sysout, Charset.forName("UTF-8")));
 
     QueueInfo queueInfo = client.getQueueInfo(queueName);
     if (queueInfo != null) {
@@ -132,11 +136,11 @@ public class QueueCLI extends YarnCLI {
     writer.print("\tMaximum Capacity : ");
     writer.println(df.format(queueInfo.getMaximumCapacity() * 100) + "%");
     writer.print("\tDefault Node Label expression : ");
-    if (null != queueInfo.getDefaultNodeLabelExpression()) {
-      writer.println(queueInfo.getDefaultNodeLabelExpression());
-    } else {
-      writer.println();
-    }
+    String nodeLabelExpression = queueInfo.getDefaultNodeLabelExpression();
+    nodeLabelExpression =
+        (nodeLabelExpression == null || nodeLabelExpression.trim().isEmpty())
+            ? NodeLabel.DEFAULT_NODE_LABEL_PARTITION : nodeLabelExpression;
+    writer.println(nodeLabelExpression);
 
     Set<String> nodeLabels = queueInfo.getAccessibleNodeLabels();
     StringBuilder labelList = new StringBuilder();
